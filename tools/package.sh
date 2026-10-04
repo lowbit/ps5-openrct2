@@ -17,6 +17,9 @@ mkdir -p "$app/sce_sys" "$app/sce_module" "$app/licenses"
 cp "$native/runtime/libc.prx" "$app/sce_module/libc.prx"
 cp "$root/sce_sys/param.json" "$root/sce_sys/icon0.png" "$app/sce_sys/"
 cp -r "$root/build/host-install/share/openrct2" "$app/data"
+# OpenRCT2 looks for its documentation (the changelog it shows after an update) in the data
+# folder when no system documentation folder exists.
+cp "$root"/build/host-install/share/doc/openrct2/* "$app/data/"
 
 cp "$root/LICENSE" "$app/licenses/OpenRCT2-GPL-3.0.txt"
 cp "$native/LICENSE" "$app/licenses/libc-prx-GPL-3.0.txt"

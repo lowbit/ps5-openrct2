@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:00:06 +0200
+Subject: [PATCH] Pick a 32-bit screen texture format, the window's own when
+ offered
+
+CopyBitsToTexture writes 32-bit pixels. The hardware display engine took the texture format with
+the fewest bytes per pixel, which SDL's software renderer answers with RGB565: no branch of
+CopyBitsToTexture matches that pitch, nothing is copied and the screen stays black. Prefer the
+window's pixel format, which also saves a conversion every frame.
+
+On the PS5, report /app0/eboot.bin as the executable path: the sandbox refuses the sysctl
+FreeBSD uses.
+---
+ .../drawing/engines/HardwareDisplayDrawingEngine.cpp       | 7 +++++--
+ src/openrct2/platform/Platform.Linux.cpp                   | 3 +++
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/openrct2-ui/drawing/engines/HardwareDisplayDrawingEngine.cpp b/src/openrct2-ui/drawing/engines/HardwareDisplayDrawingEngine.cpp
+index 9037b47..00f5e38 100644
+--- a/src/openrct2-ui/drawing/engines/HardwareDisplayDrawingEngine.cpp
++++ b/src/openrct2-ui/drawing/engines/HardwareDisplayDrawingEngine.cpp
+@@ -115,12 +115,15 @@ public:
+             LOG_WARNING("HWDisplayDrawingEngine::Resize error: %s", SDL_GetError());
+             return;
+         }
++        // CopyBitsToTexture writes 32-bit pixels. SDL's software renderer also offers 16-bit formats,
++        // which would leave the screen black. The window's own format needs no conversion when shown.
++        const uint32_t windowFormat = SDL_GetWindowPixelFormat(_window);
+         uint32_t pixelFormat = SDL_PIXELFORMAT_UNKNOWN;
+         for (uint32_t i = 0; i < rendererInfo.num_texture_formats; i++)
+         {
+             uint32_t format = rendererInfo.texture_formats[i];
+-            if (!SDL_ISPIXELFORMAT_FOURCC(format) && !SDL_ISPIXELFORMAT_INDEXED(format)
+-                && (pixelFormat == SDL_PIXELFORMAT_UNKNOWN || SDL_BYTESPERPIXEL(format) < SDL_BYTESPERPIXEL(pixelFormat)))
++            if (!SDL_ISPIXELFORMAT_FOURCC(format) && !SDL_ISPIXELFORMAT_INDEXED(format) && SDL_BYTESPERPIXEL(format) == 4
++                && (pixelFormat == SDL_PIXELFORMAT_UNKNOWN || format == windowFormat))
+             {
+                 pixelFormat = format;
+             }
+diff --git a/src/openrct2/platform/Platform.Linux.cpp b/src/openrct2/platform/Platform.Linux.cpp
+index 3e21ecb..6852c0a 100644
+--- a/src/openrct2/platform/Platform.Linux.cpp
++++ b/src/openrct2/platform/Platform.Linux.cpp
+@@ -200,6 +200,9 @@ namespace OpenRCT2::Platform
+                 break;
+             }
+         }
++    #elif defined(__PROSPERO__)
++        // A PS5 title always runs from its title folder, and the sandbox refuses the sysctl below.
++        std::strcpy(exePath, "/app0/eboot.bin");
+     #elif defined(__FreeBSD__) || defined(__NetBSD__)
+         #if defined(__FreeBSD__)
+         const int32_t mib[] = {

@@ -2,6 +2,7 @@
 
     uv run --no-project python tools/deploy.py               upload dist/PPSA99728
     uv run --no-project python tools/deploy.py --rct2 DIR    also upload an RCT2 folder as rct2/
+    uv run --no-project python tools/deploy.py --eboot       upload only eboot.bin
     uv run --no-project python tools/deploy.py cat PATH      print a console file (e.g. the log)
 
 Uses the standalone PS5Upload engine from dev/ps5/tools/push_ffpkg.py, so the PS5Upload desktop
@@ -11,6 +12,7 @@ data itself; only Data, ObjData, Scenarios, Tracks and Landscapes are sent.
 """
 import argparse
 import hashlib
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -46,7 +48,7 @@ def transfer(source, dest):
         sys.exit(f"upload failed: {j}")
 
 
-def upload(rct2):
+def upload(rct2, eboot_only):
     if not (APP / "eboot.bin").exists():
         sys.exit(f"{APP} is missing: run make package first")
     push.LOG = ROOT / "build" / "deploy.log"
@@ -54,7 +56,13 @@ def upload(rct2):
     push.start_engine()
     push.ensure_helper()
 
-    transfer(APP, DEST)
+    if eboot_only:
+        staging = ROOT / "build" / "deploy-eboot"
+        staging.mkdir(exist_ok=True)
+        shutil.copy2(APP / "eboot.bin", staging / "eboot.bin")
+        transfer(staging, DEST)
+    else:
+        transfer(APP, DEST)
     if rct2:
         missing = [name for name in RCT2_FOLDERS if not (rct2 / name).is_dir()]
         if missing:
@@ -75,4 +83,6 @@ if __name__ == "__main__":
         sys.exit()
     ap = argparse.ArgumentParser(usage=__doc__)
     ap.add_argument("--rct2", type=Path, help="RCT2 folder to upload as rct2/")
-    upload(ap.parse_args().rct2)
+    ap.add_argument("--eboot", action="store_true", help="upload only eboot.bin")
+    args = ap.parse_args()
+    upload(args.rct2, args.eboot)

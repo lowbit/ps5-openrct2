@@ -78,7 +78,7 @@ done
 builtins=$(clang-18 --print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64.a
 wraps=()
 for symbol in malloc calloc realloc free posix_memalign memalign aligned_alloc malloc_usable_size \
-    pthread_create; do
+    pthread_create exit printf vprintf fprintf vfprintf puts putchar fputs fputc fwrite; do
     wraps+=("--wrap=$symbol")
 done
 
@@ -92,3 +92,6 @@ done
 
 "$native/build/host/ps5-native-tool" link --in "$work/pie.elf" --out "$out" --stub-dir "$stubs" \
     --module-sdk 0x02000009 --companion-sdk 0x08050001 --file-name eboot.elf >/dev/null
+# The linked ELF keeps the symbols: llvm-symbolizer --obj=<output>.pie <address - 0x400000>
+# names the frames of a console crash report (the module loads at 0x400000).
+cp "$work/pie.elf" "$out.pie"

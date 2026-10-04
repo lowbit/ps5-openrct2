@@ -458,3 +458,18 @@ __attribute__((noreturn)) void __assert(const char *function, const char *file, 
     fprintf(stderr, "assertion failed: %s (%s:%d, %s)\n", expression, file, line, function);
     abort();
 }
+
+/* A title ends through the system service: the exit system call gets it killed with SIGSYS.
+ * Whatever calls exit, returning from main included, ends here; atexit handlers and static
+ * destructors do not run. */
+int sceSystemServiceLoadExec(const char *path, char *const argv[]);
+int sceKernelUsleep(unsigned microseconds);
+
+__attribute__((noreturn)) void __wrap_exit(int status)
+{
+    (void)status;
+    fflush(NULL);
+    sceSystemServiceLoadExec("exit", NULL);
+    for (;;)
+        sceKernelUsleep(1000000);
+}

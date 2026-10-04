@@ -15,7 +15,9 @@ has run on the console yet.
 | `patches/openrct2/` | The port's changes to OpenRCT2 (`tools/export-patches.sh` writes them from the `ps5` branch) |
 | `patches/sdl/` | Changes to ps5-payload-dev's SDL |
 | `src/runtime/` | What every PS5 link gets (`libps5runtime.a`): malloc from a direct-memory mspace, libc gaps, sandbox-safe folder listing, the linker script |
-| `src/port/` | PS5 code compiled into the game (`main`) |
+| `src/port/` | PS5 code compiled into the game: `main`, the log, the console test harness |
+| `sce_sys/` | `param.json` and the icon (the OpenRCT2 logo on a dark background) |
+| `test/` | Console test plans |
 | `cmake/ps5.cmake` | CMake toolchain for the console |
 | `cmake/ps5-openrct2.cmake` | Hooked into OpenRCT2's project: adds `src/port` and the static-only libraries |
 | `tools/ps5-cc`, `tools/ps5-c++`, `tools/ps5-link` | Compiler drivers for the console; any link produces a PS5 module |
@@ -100,6 +102,35 @@ offers, instead of guessing from compile-only checks.
   `getpwuid` (no user database), `arc4random`, `mkstemp`, `strcasestr`, `isatty`, `__assert`,
   `__cxa_thread_atexit_impl`. The C11 Annex K functions (`memcpy_s` and so on) exist in the libc
   but not in the SDK headers, so libzip is told it has none.
+- `thread.c`: every thread gets at least 2 MiB of stack.
+
+## The port (`src/port`)
+
+- `main.cpp`: starts the log and the test harness, writes a first-run `config.ini` (full screen,
+  interface at twice the size for the TV), selects SDL's software renderer (OpenRCT2 asks for an
+  accelerated one, which this SDL does not have) and runs OpenRCT2 with the console's paths:
+  `/app0/data` (OpenRCT2's data), `/app0/rct2` (the player's RCT2 folder), `/download0/user`
+  (config, saves, caches; `downloadDataSize` 1024 MB).
+- `log.c`: stdout and stderr go to `/app0/openrct2.log` (readable from the PC even after a crash)
+  and to the kernel log.
+- `console_test.c`: the test harness below.
+
+## On the console
+
+`make package` writes `dist/PPSA99728` (signed eboot, `libc.prx`, `sce_sys`, `data/`, licences).
+`uv run --no-project python tools/deploy.py --rct2 E:/scratch/rct2` uploads it to
+`/data/homebrew/PPSA99728`, where ShadowMountPlus registers it, plus the RCT2 game folders as
+`rct2/` (for testing, until the title imports them itself). `tools/deploy.py cat PATH` prints a
+console file, e.g. `/data/homebrew/PPSA99728/openrct2.log`.
+
+`uv run --no-project --with pillow python tools/console_test.py test/console-boot.cfg` writes the
+plan as `test.cfg` into the title folder, launches the title with the `rct2launch` payload
+(`tools/launcher`, installed into `/data/pldmgr/payloads/rct2launch/`), pulls captured frames over
+TCP port 9119 into `build/test/run/` as PNG, then the log when the plan's frame limit ends the
+game, and deletes `test.cfg`. Plan lines: `reset` (delete `/download0/user` first), `capture
+N,N,...` (frame numbers, counted from the first frame shown), `frames N` (exit after N frames).
+Frames come from SDL's window surface before it is tiled for scanout (`patches/sdl/0003`), so
+they need no de-tiling.
 
 ## Game data
 

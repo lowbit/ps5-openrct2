@@ -19,7 +19,7 @@ struct _dirdesc
     int fd;
     int length;
     int position;
-    char buffer[16384];
+    char buffer[65536];
 };
 
 /* Kernel calls return SCE_KERNEL_ERROR_* codes: 0x80020000 plus the errno value. */
@@ -75,7 +75,7 @@ struct dirent *readdir(DIR *dir)
             continue;
         }
         dir->position += entry->d_reclen;
-        if (entry->d_fileno != 0)
+        if (entry->d_namlen != 0) /* /app0 (nullfs) reports every inode as 0 */
             return entry;
     }
 }

@@ -18,8 +18,14 @@ for stub in "$sdk"/target/lib/*.so; do
     esac
 done
 
+# Outputs are replaced only when they change, so the game relinks only then.
+install_if_changed() {
+    if cmp -s "$1" "$2"; then rm -f "$1"; else mv "$1" "$2"; fi
+}
+
 "$root/tools/ps5-c++" -std=c++20 -O2 -fno-exceptions -fno-rtti \
-    -c "$native/tooling/native/app_crt.cpp" -o "$prefix/lib/ps5-crt.o"
+    -c "$native/tooling/native/app_crt.cpp" -o "$build/ps5-crt.o"
+install_if_changed "$build/ps5-crt.o" "$prefix/lib/ps5-crt.o"
 
 objects=()
 for source in "$root"/src/runtime/*.c; do
@@ -28,5 +34,6 @@ for source in "$root"/src/runtime/*.c; do
         -c "$source" -o "$object"
     objects+=("$object")
 done
-rm -f "$prefix/lib/libps5runtime.a"
-llvm-ar-18 rcs "$prefix/lib/libps5runtime.a" "${objects[@]}"
+rm -f "$build/libps5runtime.a"
+llvm-ar-18 rcsD "$build/libps5runtime.a" "${objects[@]}"
+install_if_changed "$build/libps5runtime.a" "$prefix/lib/libps5runtime.a"
