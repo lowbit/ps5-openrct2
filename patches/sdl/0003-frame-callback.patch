@@ -1,0 +1,24 @@
+--- a/src/video/ps5/SDL_ps5video.c
++++ b/src/video/ps5/SDL_ps5video.c
+@@ -30,6 +30,10 @@
+ #include "SDL_ps5remote.h"
+ #include "SDL_ps5osmesa.h"
+ 
++/* Called with every finished frame before it is shown (the PS5 OpenRCT2 port captures frames
++   for its console tests here). The pixels are SDL_PIXELFORMAT_ABGR8888. */
++void (*PS5_FrameCallback)(const void *pixels, int width, int height, int pitch);
++
+ static void PS5_DestroyWindowFramebuffer(_THIS, SDL_Window *window)
+ {
+     SDL_Surface *surface;
+@@ -79,6 +83,10 @@
+         return SDL_SetError("Couldn't find surface for window");
+     }
+ 
++    if (PS5_FrameCallback) {
++        PS5_FrameCallback(surface->pixels, surface->w, surface->h, surface->pitch);
++    }
++
+     if(surface->w == device_data->surface->w &&
+        surface->h == device_data->surface->h) {
+         PS5_Tilemap_Blit(device_data->tmap, surface->pixels, surface->pitch / 4,

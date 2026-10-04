@@ -61,7 +61,8 @@ Because every link is real, CMake and autotools configure checks see exactly wha
 offers, instead of guessing from compile-only checks.
 
 - `--no-dependent-libraries`: libc++ asks for `-lpthread`; pthreads come from libkernel.
-- The malloc family is wrapped (`--wrap`) into `src/runtime/heap.c`.
+- The malloc family is wrapped (`--wrap`) into `src/runtime/heap.c`, `pthread_create` into
+  `src/runtime/thread.c`.
 - The stubs leave out `libScePosixForWebKit` (a game process does not load it, so anything bound
   to it would be null; oot64-ps5 found this) and `libmonosgen`.
 - `ps5-native-tool` rejects weak symbols nothing defines: zstd is built with `ZSTD_TRACE=0`, and the

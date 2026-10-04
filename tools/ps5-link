@@ -77,7 +77,8 @@ done
 
 builtins=$(clang-18 --print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64.a
 wraps=()
-for symbol in malloc calloc realloc free posix_memalign memalign aligned_alloc malloc_usable_size; do
+for symbol in malloc calloc realloc free posix_memalign memalign aligned_alloc malloc_usable_size \
+    pthread_create; do
     wraps+=("--wrap=$symbol")
 done
 
