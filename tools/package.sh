@@ -33,5 +33,8 @@ cp "$sources/libogg-1.3.6/COPYING" "$app/licenses/libogg.txt"
 cp "$sources/libvorbis-1.3.7/COPYING" "$app/licenses/libvorbis.txt"
 cp "$sources/flac-1.5.0/COPYING.Xiph" "$app/licenses/FLAC.txt"
 cp "$sources/json/LICENSE.MIT" "$app/licenses/nlohmann-json.txt"
+head -n 22 "$sources/QR-Code-generator-1.8.0/c/qrcodegen.c" >"$app/licenses/qrcodegen.txt"
+# The import screen's fonts are rendered from DejaVu Sans (tools/make-font.py).
+cp /usr/share/doc/fonts-dejavu-core/copyright "$app/licenses/DejaVu-fonts.txt"
 "$tool" self --inspect --file "$app/eboot.bin" | grep -E "integrity|sha256"
 du -sh "$app"
