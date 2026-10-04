@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rijads <spaha92@gmail.com>
-Date: Sun, 4 Oct 2026 20:00:06 +0200
+Date: Sun, 4 Oct 2026 20:00:17 +0200
 Subject: [PATCH] Pick a 32-bit screen texture format, the window's own when
  offered
 
@@ -8,13 +8,9 @@ CopyBitsToTexture writes 32-bit pixels. The hardware display engine took the tex
 the fewest bytes per pixel, which SDL's software renderer answers with RGB565: no branch of
 CopyBitsToTexture matches that pitch, nothing is copied and the screen stays black. Prefer the
 window's pixel format, which also saves a conversion every frame.
-
-On the PS5, report /app0/eboot.bin as the executable path: the sandbox refuses the sysctl
-FreeBSD uses.
 ---
  .../drawing/engines/HardwareDisplayDrawingEngine.cpp       | 7 +++++--
- src/openrct2/platform/Platform.Linux.cpp                   | 3 +++
- 2 files changed, 8 insertions(+), 2 deletions(-)
+ 1 file changed, 5 insertions(+), 2 deletions(-)
 
 diff --git a/src/openrct2-ui/drawing/engines/HardwareDisplayDrawingEngine.cpp b/src/openrct2-ui/drawing/engines/HardwareDisplayDrawingEngine.cpp
 index 9037b47..00f5e38 100644
@@ -38,17 +34,3 @@ index 9037b47..00f5e38 100644
              {
                  pixelFormat = format;
              }
-diff --git a/src/openrct2/platform/Platform.Linux.cpp b/src/openrct2/platform/Platform.Linux.cpp
-index 3e21ecb..6852c0a 100644
---- a/src/openrct2/platform/Platform.Linux.cpp
-+++ b/src/openrct2/platform/Platform.Linux.cpp
-@@ -200,6 +200,9 @@ namespace OpenRCT2::Platform
-                 break;
-             }
-         }
-+    #elif defined(__PROSPERO__)
-+        // A PS5 title always runs from its title folder, and the sandbox refuses the sysctl below.
-+        std::strcpy(exePath, "/app0/eboot.bin");
-     #elif defined(__FreeBSD__) || defined(__NetBSD__)
-         #if defined(__FreeBSD__)
-         const int32_t mib[] = {
