@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Send RollerCoaster Tycoon 2 to OpenRCT2</title>
+<style>
+  :root {
+    --bg: #101820;
+    --panel: #18242f;
+    --line: #2c3c4a;
+    --text: #e8eef2;
+    --muted: #93a4b1;
+    --accent: #f2b22b;
+    --green: #58c26e;
+    --red: #e05a4f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { margin: 0 0 8px; font-size: 28px; }
+  h1 span { color: var(--accent); }
+  h2 { margin: 32px 0 8px; font-size: 18px; }
+  p { margin: 0 0 16px; color: var(--muted); }
+  code { color: var(--text); }
+  .drop {
+    display: block;
+    padding: 32px 16px;
+    margin-bottom: 12px;
+    border: 2px dashed var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    text-align: center;
+    cursor: pointer;
+  }
+  .drop.over { border-color: var(--accent); }
+  .drop strong { display: block; font-size: 20px; }
+  .drop span { color: var(--muted); }
+  .drop input { display: none; }
+  #state { margin: 16px 0 4px; }
+  progress { width: 100%; height: 8px; accent-color: var(--accent); }
+  #current { color: var(--muted); overflow-wrap: anywhere; min-height: 1.5em; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  #log li { padding: 4px 0; }
+  #log .ok::before { content: "\2713  "; color: var(--green); }
+  #log .bad::before { content: "\2717  "; color: var(--red); }
+  #offline {
+    display: none;
+    margin: 16px 0;
+    padding: 12px 16px;
+    border-radius: 8px;
+    background: #3a1714;
+  }
+  body.offline #offline { display: block; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Send <span>RollerCoaster Tycoon 2</span> to OpenRCT2</h1>
+  <p>OpenRCT2 needs the game files of your copy of RollerCoaster Tycoon 2: the folder with
+    <code>Data</code>, <code>ObjData</code>, <code>Scenarios</code>, <code>Tracks</code> and
+    <code>Landscapes</code> in it. Choose or drop that folder, or a ZIP file of it. Other files in
+    it are left out.</p>
+  <div id="offline">The console is not listening. Start OpenRCT2 on the PS5; it waits for the game
+    files on its first start.</div>
+  <label class="drop" id="drop">
+    <input id="folder" type="file" webkitdirectory multiple>
+    <strong>Drop the game folder here</strong>
+    <span>or click to choose it</span>
+  </label>
+  <label class="drop">
+    <input id="zip" type="file" accept=".zip">
+    <span>On a phone, or with the folder in a ZIP file: click to choose the ZIP</span>
+  </label>
+  <div id="state"></div>
+  <progress id="bar" max="1" value="0" hidden></progress>
+  <div id="current"></div>
+  <h2>On the console</h2>
+  <ul id="log"><li id="empty">Nothing yet.</li></ul>
+</main>
+<script>
+  const gameFolders = ["data", "objdata", "scenarios", "tracks", "landscapes"];
+  const drop = document.getElementById("drop");
+  const state = document.getElementById("state");
+  const bar = document.getElementById("bar");
+  const current = document.getElementById("current");
+  const log = document.getElementById("log");
+  let busy = false;
+  let lastNote = 0;
+
+  function addLog(text, ok) {
+    document.getElementById("empty")?.remove();
+    const item = document.createElement("li");
+    item.className = ok ? "ok" : "bad";
+    item.textContent = text;
+    log.appendChild(item);
+  }
+
+  // The path inside the game folder, from the first of the game's own folders on; null for files
+  // that are not part of the game.
+  function gamePath(path) {
+    const parts = path.split("/").filter(Boolean);
+    const start = parts.findIndex((part) => gameFolders.includes(part.toLowerCase()));
+    return start >= 0 && start < parts.length - 1 ? parts.slice(start).join("/") : null;
+  }
+
+  function put(path, file, onProgress) {
+    return new Promise((resolve) => {
+      const request = new XMLHttpRequest();
+      request.open("PUT", "/upload/" + path.split("/").map(encodeURIComponent).join("/"));
+      request.upload.onprogress = (event) => event.lengthComputable && onProgress(event.loaded);
+      request.onload = () => resolve(request.status === 200 ? null : request.responseText || "Failed");
+      request.onerror = () => resolve("Lost the connection to the console");
+      request.send(file);
+    });
+  }
+
+  async function send(list) {
+    if (busy) return;
+    const files = list.filter((entry) => entry.path !== null);
+    if (!files.length) {
+      addLog("No Data, ObjData, Scenarios, Tracks or Landscapes folder in what was chosen", false);
+      return;
+    }
+    busy = true;
+    const total = files.reduce((sum, entry) => sum + entry.file.size, 0);
+    const started = performance.now();
+    let sent = 0;
+    let failed = 0;
+    bar.hidden = false;
+    for (const [index, entry] of files.entries()) {
+      current.textContent = entry.path;
+      const error = await put(entry.path, entry.file, (loaded) => {
+        const done = sent + loaded;
+        const seconds = (performance.now() - started) / 1000;
+        bar.value = done / total;
+        state.textContent = `File ${index + 1} of ${files.length}, ${Math.floor(100 * done / total)}%,
+          ${seconds > 0 ? (done / seconds / 1048576).toFixed(1) : "0.0"} MB/s`;
+      });
+      sent += entry.file.size;
+      if (error) {
+        failed++;
+        addLog(`${entry.path}: ${error}`, false);
+      }
+    }
+    await fetch("/done", { method: "POST" }).catch(() => {});
+    current.textContent = "";
+    state.textContent = failed ? `Sent with ${failed} failures; send the folder again to retry.`
+                               : `Sent ${files.length} files.`;
+    busy = false;
+    poll();
+  }
+
+  // Folders arrive as entries that have to be walked; the entries must be taken before the
+  // first await, while the drop event is still being handled.
+  async function dropped(items) {
+    const entries = [...items].map((item) => item.webkitGetAsEntry && item.webkitGetAsEntry()).filter(Boolean);
+    const found = [];
+    const walk = async (entry, path) => {
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        found.push({ file, name: path + entry.name });
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        for (;;) {
+          const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          if (!batch.length) break;
+          for (const child of batch) await walk(child, path + entry.name + "/");
+        }
+      }
+    };
+    for (const entry of entries) await walk(entry, "");
+    return found;
+  }
+
+  function chosen(list) {
+    const zips = list.filter((entry) => /\.zip$/i.test(entry.name) && !entry.name.includes("/"));
+    if (zips.length) {
+      send(zips.map((entry) => ({ file: entry.file, path: entry.name })));
+    } else {
+      send(list.map((entry) => ({ file: entry.file, path: gamePath(entry.name) })));
+    }
+  }
+
+  async function poll() {
+    // The console answers one request at a time, so it is asked only between uploads.
+    if (busy) return;
+    try {
+      const response = await fetch("/status?after=" + lastNote, { cache: "no-store" });
+      const status = await response.json();
+      for (const note of status.notes) {
+        lastNote = note.id;
+        addLog(note.text, note.ok);
+      }
+      document.body.classList.remove("offline");
+    } catch {
+      document.body.classList.add("offline");
+    }
+  }
+
+  // The whole page takes drops, so a folder let go next to the box is not opened by the browser.
+  window.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    drop.classList.add("over");
+  });
+  window.addEventListener("dragleave", (event) => {
+    if (!event.relatedTarget) drop.classList.remove("over");
+  });
+  window.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    drop.classList.remove("over");
+    const items = event.dataTransfer.items;
+    chosen(items && items.length && items[0].webkitGetAsEntry
+      ? await dropped(items)
+      : [...event.dataTransfer.files].map((file) => ({ file, name: file.name })));
+  });
+  for (const id of ["folder", "zip"]) {
+    const picker = document.getElementById(id);
+    picker.addEventListener("change", () => {
+      chosen([...picker.files].map((file) => ({ file, name: file.webkitRelativePath || file.name })));
+      picker.value = "";
+    });
+  }
+  setInterval(poll, 1500);
+  poll();
+</script>
+</body>
+</html>

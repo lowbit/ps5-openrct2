@@ -6,6 +6,10 @@ set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 build="$root/build/ps5"
 
+# Headers the import screen includes: its web page and its fonts.
+python3 "$root/tools/embed-file.py" "$root/src/port/upload.html" upload_page "$root/build/gen/upload_page.h"
+python3 "$root/tools/make-font.py" "$root/build/gen/font.h"
+
 cmake -S "$root/OpenRCT2" -B "$build" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$root/cmake/ps5.cmake" \
     -DCMAKE_PROJECT_INCLUDE="$root/cmake/ps5-openrct2.cmake" \

@@ -5,8 +5,12 @@ add_compile_definitions(U_STATIC_IMPLEMENTATION U_SIZEOF_WCHAR_T=2)
 
 function(ps5_port)
     file(GLOB port_sources CONFIGURE_DEPENDS "${PS5_PORT_ROOT}/src/port/*.cpp" "${PS5_PORT_ROOT}/src/port/*.c")
-    target_sources(openrct2 PRIVATE ${port_sources})
-    target_include_directories(openrct2 PRIVATE "${PS5_PORT_ROOT}/src/runtime")
+    # The import screen's QR code, page and fonts: qrcodegen from tools/build-deps.sh, the headers
+    # from tools/build-ps5.sh.
+    set(qrcodegen "${PS5_PORT_ROOT}/.deps/src/QR-Code-generator-1.8.0/c")
+    target_sources(openrct2 PRIVATE ${port_sources} "${qrcodegen}/qrcodegen.c")
+    target_include_directories(openrct2 PRIVATE "${PS5_PORT_ROOT}/src/runtime" "${PS5_PORT_ROOT}/build/gen"
+        "${qrcodegen}" "${PS5_PREFIX}/include")
     # tools/ps5-link adds these to every link; relink when they change.
     file(GLOB stubs CONFIGURE_DEPENDS "${PS5_PREFIX}/stubs/*.so")
     set_property(TARGET openrct2 APPEND PROPERTY LINK_DEPENDS

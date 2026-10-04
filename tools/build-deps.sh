@@ -187,3 +187,11 @@ if ! built sdl2; then
         -DSDL_LIBSAMPLERATE=OFF -DSDL_LOADSO=OFF
     done_with sdl2
 fi
+
+# qrcodegen for the import screen's QR code; it is compiled with the game (cmake/ps5-openrct2.cmake).
+if ! built qrcodegen; then
+    fetch QR-Code-generator-1.8.0.tar.gz 2ec0a4d33d6f521c942eeaf473d42d5fe139abcfa57d2beffe10c5cf7d34ae60 \
+        https://github.com/nayuki/QR-Code-generator/archive/refs/tags/v1.8.0.tar.gz
+    unpack QR-Code-generator-1.8.0.tar.gz QR-Code-generator-1.8.0
+    done_with qrcodegen
+fi

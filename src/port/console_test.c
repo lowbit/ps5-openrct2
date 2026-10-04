@@ -9,6 +9,8 @@
  *   arg ARGUMENT     pass ARGUMENT to OpenRCT2's command line (e.g. --verbose)
  *   input SCRIPT     controller input (see pad_script.c), frames counted like capture's
  *   point N X Y      put the pointer at window pixel X, Y at frame N
+ *   game PATH        use PATH as the game folder (an empty one shows the import screen)
+ *   remove PATH      delete PATH first (only below /app0/ or /download0/)
  * The runner connects whenever it likes and gets what is queued: for each item a 32-bit name
  * length, the name, a 64-bit size and the data, then a zero name length. Frames are named
  * frame<N>-<width>x<height> and hold raw RGBA rows. */
@@ -54,6 +56,7 @@ static int frame_limit;
 static int frame;
 static char arguments[MAX_ARGUMENTS][128];
 static int argument_count;
+static char game_path[256];
 static struct
 {
     int frame, x, y;
@@ -361,6 +364,14 @@ void ps5_console_test_start(void)
                        &points[point_count].y) == 3)
                 point_count++;
         }
+        else if (strncmp(line, "game ", 5) == 0)
+            snprintf(game_path, sizeof(game_path), "%s", line + 5);
+        else if (strncmp(line, "remove ", 7) == 0 &&
+                 (strncmp(line + 7, "/app0/", 6) == 0 || strncmp(line + 7, "/download0/", 11) == 0))
+        {
+            remove_tree(line + 7);
+            printf("test: removed %s\n", line + 7);
+        }
         else if (strncmp(line, "input ", 6) == 0)
             pad_script_add(line + 6);
         else if (strncmp(line, "arg ", 4) == 0 && argument_count < MAX_ARGUMENTS)
@@ -380,4 +391,9 @@ int ps5_console_test_arguments(const char **out, int max)
     for (int i = 0; i < count; i++)
         out[i] = arguments[i];
     return count;
+}
+
+const char *ps5_console_test_game_path(void)
+{
+    return game_path[0] != '\0' ? game_path : NULL;
 }

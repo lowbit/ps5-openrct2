@@ -8,12 +8,14 @@
 #include <SDL.h>
 #include <cstdio>
 #include <openrct2-ui/Ui.h>
+#include <string>
 #include <sys/stat.h>
 #include <vector>
 
 namespace
 {
     constexpr const char* kUserPath = "/download0/user";
+    constexpr const char* kGamePath = "/app0/rct2";
     constexpr const char* kConfigPath = "/download0/user/config.ini";
 
     // On first run: full screen at the TV's resolution, the interface drawn at twice the size
@@ -48,11 +50,15 @@ int main()
     WriteDefaultConfig();
     // The PS5 SDL has only the software renderer, and OpenRCT2 asks for an accelerated one.
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+    const char* gamePath = ps5_console_test_game_path() != nullptr ? ps5_console_test_game_path() : kGamePath;
+    if (!ps5_game_data_present(gamePath))
+        ps5_import_game_data(gamePath);
+    const std::string gameArgument = std::string("--rct2-data-path=") + gamePath;
 
     std::vector<const char*> argv = {
         "openrct2",
         "--openrct2-data-path=/app0/data",
-        "--rct2-data-path=/app0/rct2",
+        gameArgument.c_str(),
         "--user-data-path=/download0/user",
     };
     const char* extra[8];
