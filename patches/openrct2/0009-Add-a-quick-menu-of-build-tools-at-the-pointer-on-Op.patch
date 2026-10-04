@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 21:34:21 +0200
+Subject: [PATCH] Add a quick menu of build tools at the pointer, on Options on
+ the PS5
+
+A controller's pointer is a long way from the top toolbar. The quick menu shows the toolbar's
+build tools (ride, footpath, scenery, land, water, clear scenery) and park windows (rides, park,
+guests, map) around the pointer; each button runs the toolbar's shortcut. Pressing Options
+again closes it.
+---
+ src/openrct2-ui/input/Shortcuts.cpp    |   6 ++
+ src/openrct2-ui/windows/QuickMenu.cpp  | 114 +++++++++++++++++++++++++
+ src/openrct2-ui/windows/Windows.h      |   1 +
+ src/openrct2/interface/WindowClasses.h |   1 +
+ 4 files changed, 122 insertions(+)
+ create mode 100644 src/openrct2-ui/windows/QuickMenu.cpp
+
+diff --git a/src/openrct2-ui/input/Shortcuts.cpp b/src/openrct2-ui/input/Shortcuts.cpp
+index e3a2868..0d9345f 100644
+--- a/src/openrct2-ui/input/Shortcuts.cpp
++++ b/src/openrct2-ui/input/Shortcuts.cpp
+@@ -921,10 +921,16 @@ void ShortcutManager::registerDefaultShortcuts()
+     // clang-format on
+ 
+ #ifdef __PROSPERO__
++    registerShortcut(RegisteredShortcut("interface.open.quick_menu", "Quick menu (build tools)", []() {
++        if (gLegacyScene != LegacyScene::titleSequence)
++            QuickMenuToggle();
++    }));
++
+     // The PS5 is played with a DualSense. The left stick, Cross, Square, Circle and the touchpad
+     // drive the pointer (GamepadPointer) and the right stick scrolls; these are the other buttons.
+     // JOY numbers count from 1 in SDL's PS5 button order.
+     static constexpr std::pair<std::string_view, std::string_view> kControllerDefaults[] = {
++        { "interface.open.quick_menu", "JOY 7" },                      // Options
+         { ShortcutId::kInterfaceCloseAll, "JOY 4" },                   // Triangle
+         { ShortcutId::kViewGeneralRotateAnticlockwise, "JOY 10" },     // L1
+         { ShortcutId::kViewGeneralRotateClockwise, "JOY 11" },         // R1
+diff --git a/src/openrct2-ui/windows/QuickMenu.cpp b/src/openrct2-ui/windows/QuickMenu.cpp
+new file mode 100644
+index 0000000..3c5f1fd
+--- /dev/null
++++ b/src/openrct2-ui/windows/QuickMenu.cpp
+@@ -0,0 +1,114 @@
++/*****************************************************************************
++ * Copyright (c) 2014-2026 OpenRCT2 developers
++ *
++ * For a complete list of all authors, please refer to contributors.md
++ * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
++ *
++ * OpenRCT2 is licensed under the GNU General Public License version 3.
++ *****************************************************************************/
++
++#include "../UiContext.h"
++#include "../input/ShortcutIds.h"
++#include "../input/ShortcutManager.h"
++
++#include <algorithm>
++#include <array>
++#include <openrct2-ui/interface/Widget.h>
++#include <openrct2-ui/interface/Window.h>
++#include <openrct2-ui/windows/Windows.h>
++#include <openrct2/Context.h>
++#include <openrct2/Input.h>
++#include <openrct2/SpriteIds.h>
++#include <openrct2/ui/WindowManager.h>
++
++namespace OpenRCT2::Ui::Windows
++{
++    // The top toolbar's build tools and park windows next to the pointer, for a controller, whose
++    // pointer is a long way from the toolbar. Each button runs the toolbar's shortcut.
++    struct QuickMenuEntry
++    {
++        ImageIndex image;
++        StringId tooltip;
++        std::string_view shortcut;
++    };
++
++    static constexpr QuickMenuEntry kEntries[] = {
++        { SPR_TOOLBAR_CONSTRUCT_RIDE, STR_BUILD_RIDE_TIP, ShortcutId::kInterfaceOpenNewRide },
++        { SPR_TOOLBAR_FOOTPATH, STR_BUILD_FOOTPATH_TIP, ShortcutId::kInterfaceOpenFootpaths },
++        { SPR_TOOLBAR_SCENERY, STR_PLACE_SCENERY_TIP, ShortcutId::kInterfaceOpenScenery },
++        { SPR_TOOLBAR_LAND, STR_ADJUST_LAND_TIP, ShortcutId::kInterfaceOpenLand },
++        { SPR_TOOLBAR_WATER, STR_ADJUST_WATER_TIP, ShortcutId::kInterfaceOpenWater },
++        { SPR_TOOLBAR_CLEAR_SCENERY, STR_CLEAR_SCENERY_TIP, ShortcutId::kInterfaceClearScenery },
++        { SPR_TOOLBAR_RIDES, STR_RIDES_IN_PARK_TIP, ShortcutId::kInterfaceOpenRides },
++        { SPR_TOOLBAR_PARK, STR_PARK_INFORMATION_TIP, ShortcutId::kInterfaceOpenPark },
++        { SPR_TOOLBAR_GUESTS, STR_GUESTS_TIP, ShortcutId::kInterfaceOpenGuests },
++        { SPR_TOOLBAR_MAP, STR_SHOW_MAP_TIP, ShortcutId::kInterfaceOpenMap },
++    };
++
++    static constexpr int32_t kColumns = 5;
++    static constexpr ScreenSize kButtonSize = { 30, 28 };
++    static constexpr int32_t kBorder = 2;
++    static constexpr int32_t kRows = (static_cast<int32_t>(std::size(kEntries)) + kColumns - 1) / kColumns;
++    static constexpr ScreenSize kWindowSize = { kColumns * kButtonSize.width + 2 * kBorder,
++                                                kRows * kButtonSize.height + 2 * kBorder };
++
++    static constexpr auto MakeQuickMenuWidgets()
++    {
++        std::array<Widget, std::size(kEntries) + 1> widgets{};
++        widgets[0] = makeWidget({ 0, 0 }, kWindowSize, WidgetType::frame, WindowColour::primary);
++        for (size_t i = 0; i < std::size(kEntries); i++)
++        {
++            const ScreenCoordsXY position = { kBorder + static_cast<int32_t>(i % kColumns) * kButtonSize.width,
++                                              kBorder + static_cast<int32_t>(i / kColumns) * kButtonSize.height };
++            widgets[i + 1] = makeRemapWidget(
++                position, kButtonSize, WidgetType::trnBtn, WindowColour::tertiary, kEntries[i].image, kEntries[i].tooltip);
++        }
++        return widgets;
++    }
++
++    static constexpr auto _quickMenuWidgets = MakeQuickMenuWidgets();
++
++    class QuickMenuWindow final : public Window
++    {
++    public:
++        void onOpen() override
++        {
++            setWidgets(_quickMenuWidgets);
++            WindowInitScrollWidgets(*this);
++        }
++
++        void onMouseUp(WidgetIndex widgetIndex) override
++        {
++            if (widgetIndex < 1 || widgetIndex > static_cast<WidgetIndex>(std::size(kEntries)))
++                return;
++            const auto shortcutId = kEntries[widgetIndex - 1].shortcut;
++            auto* windowMgr = GetWindowManager();
++            windowMgr->Close(*this);
++            if (auto* shortcut = GetShortcutManager().getShortcut(shortcutId))
++                shortcut->action();
++        }
++
++        void onDraw(Drawing::RenderTarget& rt) override
++        {
++            drawWidgets(rt);
++        }
++    };
++
++    WindowBase* QuickMenuToggle()
++    {
++        auto* windowMgr = GetWindowManager();
++        if (auto* window = windowMgr->FindByClass(WindowClass::quickMenu))
++        {
++            windowMgr->Close(*window);
++            return nullptr;
++        }
++
++        // Centred on the pointer, kept on the screen.
++        const auto* cursor = ContextGetCursorState();
++        const ScreenCoordsXY position = {
++            std::clamp(cursor->position.x - kWindowSize.width / 2, 0, std::max(0, ContextGetWidth() - kWindowSize.width)),
++            std::clamp(cursor->position.y - kWindowSize.height / 2, 0, std::max(0, ContextGetHeight() - kWindowSize.height)),
++        };
++        return windowMgr->Create<QuickMenuWindow>(WindowClass::quickMenu, position, kWindowSize, { WindowFlag::noTitleBar });
++    }
++} // namespace OpenRCT2::Ui::Windows
+diff --git a/src/openrct2-ui/windows/Windows.h b/src/openrct2-ui/windows/Windows.h
+index e42d57c..b38e28c 100644
+--- a/src/openrct2-ui/windows/Windows.h
++++ b/src/openrct2-ui/windows/Windows.h
+@@ -76,6 +76,7 @@ namespace OpenRCT2::Ui::Windows
+ 
+     // ClearScenery
+     WindowBase* ClearSceneryOpen();
++    WindowBase* QuickMenuToggle();
+     void ToggleClearSceneryWindow();
+ 
+     // CustomCurrency
+diff --git a/src/openrct2/interface/WindowClasses.h b/src/openrct2/interface/WindowClasses.h
+index eb9a57f..c353a7f 100644
+--- a/src/openrct2/interface/WindowClasses.h
++++ b/src/openrct2/interface/WindowClasses.h
+@@ -96,6 +96,7 @@ namespace OpenRCT2
+         editorParkEntrance = 139,
+         editorStepController = 140,
+         editorStatusLine = 141,
++        quickMenu = 142,
+ 
+         // Only used for colour schemes
+         staff = 220,
