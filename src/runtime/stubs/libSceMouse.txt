@@ -1,0 +1,4 @@
+sceMouseInit
+sceMouseOpen
+sceMouseRead
+sceMouseClose

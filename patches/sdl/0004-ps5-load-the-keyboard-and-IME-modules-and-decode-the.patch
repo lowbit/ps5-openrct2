@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:22:01 +0200
+Subject: [PATCH] ps5: load the keyboard and IME modules, and decode the IME's
+ UTF-16
+
+A native title gets libSceKeyboard and libSceImeDialog only when it loads them, and calls into
+them crash until then. The IME dialog also needs the common dialog library set up first. Its
+result is UTF-16, which wcstombs only converted for ASCII in the C locale.
+---
+ src/video/ps5/SDL_ps5keyboard.c | 23 +++++++++++++++++++++--
+ src/video/ps5/SDL_ps5video.c    |  5 +++--
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/src/video/ps5/SDL_ps5keyboard.c b/src/video/ps5/SDL_ps5keyboard.c
+index 06df1231..9a413700 100644
+--- a/src/video/ps5/SDL_ps5keyboard.c
++++ b/src/video/ps5/SDL_ps5keyboard.c
+@@ -102,6 +102,13 @@ typedef struct SceImeDialogResult
+ } SceImeDialogResult;
+ 
+ 
++/* A native title loads these modules itself; their imports are null until then. */
++#define PS5_SYSMODULE_KEYBOARD 0x0106
++#define PS5_SYSMODULE_IME_DIALOG 0x0096
++
++int sceSysmoduleLoadModule(uint32_t id);
++int sceCommonDialogInitialize(void);
++
+ int sceKeyboardInit(void);
+ int sceKeyboardOpen(int, int, int, void *);
+ int sceKeyboardReadState(int, keyboard_state_t *);
+@@ -176,6 +183,14 @@ int PS5_Keyboard_Init(void)
+         return SDL_SetError("sceUserServiceInitialize: 0x%08x", err);
+     }
+ 
++    /* The IME dialog needs the common dialog library first; it may already be set up. */
++    sceCommonDialogInitialize();
++    sceSysmoduleLoadModule(PS5_SYSMODULE_IME_DIALOG);
++
++    err = sceSysmoduleLoadModule(PS5_SYSMODULE_KEYBOARD);
++    if (err != 0) {
++        return SDL_SetError("sceSysmoduleLoadModule(keyboard): 0x%08x", err);
++    }
+     err = sceKeyboardInit();
+     if (err != 0) {
+         return SDL_SetError("sceKeyboardInit: 0x%08x", err);
+@@ -188,7 +203,7 @@ static int PS5_ImeDialog_PumpEvents(void)
+ {
+     SceImeDialogStatus status = sceImeDialogGetStatus();
+     SceImeDialogResult result = {0};
+-    char text[0x800];
++    char *text;
+ 
+     if (g_ime_dialog_status == status) {
+         return 0;
+@@ -215,8 +230,12 @@ static int PS5_ImeDialog_PumpEvents(void)
+ 
+     switch (result.outcome) {
+     case SCE_IME_DIALOG_END_STATUS_OK:
+-        if (wcstombs(text, g_ime_dialog_text, sizeof(text)) >= 0) {
++        /* The dialog returns UTF-16 (wchar_t has 16 bits on the PS5). */
++        text = SDL_iconv_string("UTF-8", "UTF-16LE", (const char *)g_ime_dialog_text,
++                                SDL_wcslen(g_ime_dialog_text) * sizeof(g_ime_dialog_text[0]));
++        if (text) {
+             SDL_SendKeyboardText(text);
++            SDL_free(text);
+         }
+         SDL_SendKeyboardKeyAutoRelease(SDL_SCANCODE_RETURN);
+         break;
+diff --git a/src/video/ps5/SDL_ps5video.c b/src/video/ps5/SDL_ps5video.c
+index 2e79cbd2..cde02d0e 100644
+--- a/src/video/ps5/SDL_ps5video.c
++++ b/src/video/ps5/SDL_ps5video.c
+@@ -330,8 +330,9 @@ static SDL_VideoDevice *PS5_CreateDevice(void)
+     }
+ 
+     PS5_Remote_Init();
+-    PS5_Keyboard_Init();
+-    PS5_Keyboard_Open();
++    if (PS5_Keyboard_Init() == 0) {
++        PS5_Keyboard_Open();
++    }
+ 
+     device->VideoInit = PS5_VideoInit;
+     device->VideoQuit = PS5_VideoQuit;

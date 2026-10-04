@@ -142,7 +142,8 @@ fi
 # OpenRCT2 reads (String::convertToUtf8: windows-1252, windows-932, GB2312, windows-949 and
 # Big5; tools/icu-filter.json). Case mapping and bidi data are compiled into the code. ICU builds
 # its data with tools made for the build machine, so a cross build needs a host build first.
-# Every char string on the console is UTF-8, and the libc has no nl_langinfo.
+# Every char string on the console is UTF-8, wchar_t has 16 bits (ICU assumes 32 on FreeBSD), and
+# the libc has no nl_langinfo.
 if ! built icu; then
     fetch icu4c-78.3-sources.tgz 3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0 \
         https://github.com/unicode-org/icu/releases/download/release-78.3/icu4c-78.3-sources.tgz
@@ -160,7 +161,7 @@ if ! built icu; then
         CC=clang CXX=clang++ "$sources/icu/source/configure" "${options[@]}" &&
         make -j"$(nproc)") >"$build/icu-host.log" 2>&1
     flags="-O2 -ffunction-sections -fdata-sections -DU_STATIC_IMPLEMENTATION -DU_CHARSET_IS_UTF8=1"
-    flags+=" -DU_HAVE_NL_LANGINFO_CODESET=0"
+    flags+=" -DU_HAVE_NL_LANGINFO_CODESET=0 -DU_SIZEOF_WCHAR_T=2"
     (cd "$build/icu" &&
         CC="$root/tools/ps5-cc" CXX="$root/tools/ps5-c++" AR=llvm-ar-18 RANLIB=llvm-ranlib-18 \
             CFLAGS="$flags" CXXFLAGS="$flags" \

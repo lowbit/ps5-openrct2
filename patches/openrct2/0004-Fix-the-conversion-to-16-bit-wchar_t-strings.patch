@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:45:55 +0200
+Subject: [PATCH] Fix the conversion to 16-bit wchar_t strings
+
+The U_SIZEOF_WCHAR_T == 2 branch of toWideChar did not compile (a static_cast from const
+char16_t*), and it read ICU's buffer as if it were null-terminated. The PS5 has 16-bit wchar_t.
+---
+ src/openrct2/core/String.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/openrct2/core/String.cpp b/src/openrct2/core/String.cpp
+index 8914308..988dcae 100644
+--- a/src/openrct2/core/String.cpp
++++ b/src/openrct2/core/String.cpp
+@@ -98,8 +98,8 @@ namespace OpenRCT2::String
+         str.toUTF32(reinterpret_cast<UChar32*>(&result[0]), str.length(), status);
+ 
+     #elif U_SIZEOF_WCHAR_T == 2
+-        const char16_t* buffer = str.getBuffer();
+-        std::wstring result = static_cast<wchar_t*>(buffer);
++        // getBuffer() is not null-terminated, so the length comes from the string.
++        std::wstring result(reinterpret_cast<const wchar_t*>(str.getBuffer()), static_cast<size_t>(str.length()));
+ 
+     #else
+         #error Unsupported U_SIZEOF_WCHAR_T size

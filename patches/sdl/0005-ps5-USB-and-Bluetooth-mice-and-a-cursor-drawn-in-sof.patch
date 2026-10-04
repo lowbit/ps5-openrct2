@@ -1,0 +1,508 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:22:01 +0200
+Subject: [PATCH] ps5: USB and Bluetooth mice, and a cursor drawn in software
+
+Mice come through libSceMouse. The PS5 has no hardware cursor, so the current cursor (an
+application's own, or a built-in arrow or hand) is drawn into each frame before it is shown and
+the pixels under it are put back afterwards. It appears once a pointer is in use, so games played
+with a controller only see no cursor. The window gets mouse and keyboard focus.
+---
+ src/video/ps5/SDL_ps5mouse.c | 361 +++++++++++++++++++++++++++++++++++
+ src/video/ps5/SDL_ps5mouse.h |  42 ++++
+ src/video/ps5/SDL_ps5video.c |  24 +++
+ 3 files changed, 427 insertions(+)
+ create mode 100644 src/video/ps5/SDL_ps5mouse.c
+ create mode 100644 src/video/ps5/SDL_ps5mouse.h
+
+diff --git a/src/video/ps5/SDL_ps5mouse.c b/src/video/ps5/SDL_ps5mouse.c
+new file mode 100644
+index 00000000..8df760ea
+--- /dev/null
++++ b/src/video/ps5/SDL_ps5mouse.c
+@@ -0,0 +1,361 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2018 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/* USB and Bluetooth mice through libSceMouse, and a cursor drawn in software: the PS5 has no
++   hardware cursor, so the current cursor is drawn into each frame before it is shown and the
++   pixels under it are put back afterwards. The cursor appears once a pointer is in use (a mouse
++   moved, or the application warped the pointer), so games played with a controller only do not
++   get an arrow in the middle of the screen. */
++
++#include "../../SDL_internal.h"
++
++#ifdef SDL_VIDEO_DRIVER_PS5
++
++#include "SDL_ps5mouse.h"
++
++#include "SDL_events.h"
++#include "../../events/SDL_mouse_c.h"
++
++#define PS5_SYSMODULE_MOUSE 0x00a9
++#define PS5_MOUSE_SLOTS 4
++#define PS5_MOUSE_BATCH 32
++#define PS5_MOUSE_INTERCEPTED 0x80000000u
++
++typedef struct
++{
++    uint64_t timestamp;
++    uint8_t connected;
++    uint8_t padding[3];
++    uint32_t buttons;
++    int32_t x;
++    int32_t y;
++    int32_t wheel;
++    int32_t tilt;
++    uint8_t reserved[8];
++} PS5_MouseData;
++
++typedef struct
++{
++    uint8_t behavior;
++    uint8_t reserved[7];
++} PS5_MouseOpenParam;
++
++int sceSysmoduleLoadModule(uint32_t id);
++int sceUserServiceGetForegroundUser(int *user_id);
++int sceMouseInit(void);
++int sceMouseOpen(int user_id, int type, int index, const PS5_MouseOpenParam *param);
++int sceMouseRead(int handle, PS5_MouseData *data, int count);
++
++typedef struct
++{
++    SDL_Surface *image; /* SDL_PIXELFORMAT_ABGR8888, the window surface's format */
++    int hot_x;
++    int hot_y;
++} PS5_CursorData;
++
++static int mouse_handles[PS5_MOUSE_SLOTS];
++static uint32_t mouse_buttons[PS5_MOUSE_SLOTS];
++static SDL_Cursor *shown_cursor;
++static SDL_bool pointer_in_use;
++
++/* The pixels the cursor covers in the current frame, put back by PS5_Mouse_UndrawCursor. */
++static Uint32 *under_cursor;
++static size_t under_cursor_size;
++static SDL_Rect drawn_rect;
++
++/* System cursors: X is the outline, o the fill, anything else transparent. */
++static const char *const arrow_image[] = {
++    "X",
++    "XX",
++    "XoX",
++    "XooX",
++    "XoooX",
++    "XooooX",
++    "XoooooX",
++    "XooooooX",
++    "XoooooooX",
++    "XooooooooX",
++    "XoooooXXXXX",
++    "XooXooX",
++    "XoX XooX",
++    "XX  XooX",
++    "X    XooX",
++    "     XooX",
++    "      XooX",
++    "      XooX",
++    "       XX",
++};
++
++static const char *const hand_image[] = {
++    "     XX",
++    "    XooX",
++    "    XooX",
++    "    XooX",
++    "    XooX",
++    "    XooXXX",
++    "    XooXooXXX",
++    "    XooXooXooXX",
++    " XX XooXooXooXoX",
++    "XooXXooooooooXoX",
++    "XoooXoooooooooooX",
++    " XooXoooooooooooX",
++    "  XoXoooooooooooX",
++    "  XooooooooooooX",
++    "   XoooooooooooX",
++    "   XooooooooooX",
++    "    XooooooooX",
++    "    XooooooooX",
++    "     XXXXXXXX",
++};
++
++static SDL_Cursor *PS5_CreateCursorFromSurface(SDL_Surface *surface, int hot_x, int hot_y)
++{
++    SDL_Cursor *cursor = SDL_calloc(1, sizeof(*cursor));
++    PS5_CursorData *data = SDL_calloc(1, sizeof(*data));
++
++    if (!cursor || !data) {
++        SDL_free(cursor);
++        SDL_free(data);
++        SDL_OutOfMemory();
++        return NULL;
++    }
++    data->image = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_ABGR8888, 0);
++    if (!data->image) {
++        SDL_free(cursor);
++        SDL_free(data);
++        return NULL;
++    }
++    data->hot_x = hot_x;
++    data->hot_y = hot_y;
++    cursor->driverdata = data;
++    return cursor;
++}
++
++static SDL_Cursor *PS5_CreateCursor(SDL_Surface *surface, int hot_x, int hot_y)
++{
++    return PS5_CreateCursorFromSurface(surface, hot_x, hot_y);
++}
++
++/* System cursors are drawn at one image pixel per 540 lines of the display, so they keep their
++   size on a TV. */
++static SDL_Cursor *PS5_CreateImageCursor(const char *const *image, int rows, int hot_x, int hot_y)
++{
++    SDL_DisplayMode mode;
++    SDL_Surface *surface;
++    SDL_Cursor *cursor;
++    int scale = 1;
++    int width = 0;
++    int x, y;
++
++    if (SDL_GetDesktopDisplayMode(0, &mode) == 0 && mode.h >= 1080) {
++        scale = mode.h / 540;
++    }
++    for (y = 0; y < rows; y++) {
++        width = SDL_max(width, (int)SDL_strlen(image[y]));
++    }
++    surface = SDL_CreateRGBSurfaceWithFormat(0, width * scale, rows * scale, 32, SDL_PIXELFORMAT_ABGR8888);
++    if (!surface) {
++        return NULL;
++    }
++    SDL_FillRect(surface, NULL, 0);
++    for (y = 0; y < rows; y++) {
++        for (x = 0; image[y][x]; x++) {
++            SDL_Rect pixel = { x * scale, y * scale, scale, scale };
++            if (image[y][x] == 'X') {
++                SDL_FillRect(surface, &pixel, SDL_MapRGBA(surface->format, 0, 0, 0, 255));
++            } else if (image[y][x] == 'o') {
++                SDL_FillRect(surface, &pixel, SDL_MapRGBA(surface->format, 255, 255, 255, 255));
++            }
++        }
++    }
++    cursor = PS5_CreateCursorFromSurface(surface, hot_x * scale, hot_y * scale);
++    SDL_FreeSurface(surface);
++    return cursor;
++}
++
++static SDL_Cursor *PS5_CreateSystemCursor(SDL_SystemCursor id)
++{
++    switch (id) {
++    case SDL_SYSTEM_CURSOR_HAND:
++        return PS5_CreateImageCursor(hand_image, SDL_arraysize(hand_image), 5, 0);
++    default:
++        return PS5_CreateImageCursor(arrow_image, SDL_arraysize(arrow_image), 0, 0);
++    }
++}
++
++static int PS5_ShowCursor(SDL_Cursor *cursor)
++{
++    shown_cursor = cursor;
++    return 0;
++}
++
++static void PS5_FreeCursor(SDL_Cursor *cursor)
++{
++    PS5_CursorData *data = cursor->driverdata;
++
++    if (shown_cursor == cursor) {
++        shown_cursor = NULL;
++    }
++    if (data) {
++        SDL_FreeSurface(data->image);
++        SDL_free(data);
++    }
++    SDL_free(cursor);
++}
++
++static void PS5_WarpMouse(SDL_Window *window, int x, int y)
++{
++    pointer_in_use = SDL_TRUE;
++    SDL_SendMouseMotion(window, SDL_GetMouse()->mouseID, 0, x, y);
++}
++
++void PS5_Mouse_Init(void)
++{
++    SDL_Mouse *mouse = SDL_GetMouse();
++    PS5_MouseOpenParam param;
++    int user_id = 0;
++    int i;
++
++    mouse->CreateCursor = PS5_CreateCursor;
++    mouse->CreateSystemCursor = PS5_CreateSystemCursor;
++    mouse->ShowCursor = PS5_ShowCursor;
++    mouse->FreeCursor = PS5_FreeCursor;
++    mouse->WarpMouse = PS5_WarpMouse;
++    SDL_SetDefaultCursor(PS5_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW));
++
++    for (i = 0; i < PS5_MOUSE_SLOTS; i++) {
++        mouse_handles[i] = -1;
++    }
++    if (sceSysmoduleLoadModule(PS5_SYSMODULE_MOUSE) != 0 || sceMouseInit() != 0 ||
++        sceUserServiceGetForegroundUser(&user_id) != 0) {
++        return;
++    }
++    SDL_zero(param);
++    for (i = 0; i < PS5_MOUSE_SLOTS; i++) {
++        mouse_handles[i] = sceMouseOpen(user_id, 0, i, &param);
++    }
++}
++
++void PS5_Mouse_PumpEvents(void)
++{
++    static const Uint8 buttons[] = { SDL_BUTTON_LEFT, SDL_BUTTON_RIGHT, SDL_BUTTON_MIDDLE, SDL_BUTTON_X1, SDL_BUTTON_X2 };
++    SDL_Window *window = SDL_GetMouseFocus();
++    PS5_MouseData samples[PS5_MOUSE_BATCH];
++    int slot, i, b;
++
++    for (slot = 0; slot < PS5_MOUSE_SLOTS; slot++) {
++        int count;
++
++        if (mouse_handles[slot] < 0) {
++            continue;
++        }
++        count = sceMouseRead(mouse_handles[slot], samples, PS5_MOUSE_BATCH);
++        for (i = 0; i < count && i < PS5_MOUSE_BATCH; i++) {
++            const PS5_MouseData *sample = &samples[i];
++            uint32_t pressed = 0;
++
++            if (sample->connected && !(sample->buttons & PS5_MOUSE_INTERCEPTED)) {
++                pressed = sample->buttons & 0x1f;
++                if (sample->x || sample->y) {
++                    pointer_in_use = SDL_TRUE;
++                    SDL_SendMouseMotion(window, slot, 1, sample->x, sample->y);
++                }
++                if (sample->wheel) {
++                    SDL_SendMouseWheel(window, slot, 0.0f, (float)sample->wheel, SDL_MOUSEWHEEL_NORMAL);
++                }
++            }
++            for (b = 0; b < (int)SDL_arraysize(buttons); b++) {
++                uint32_t bit = 1u << b;
++                if ((pressed ^ mouse_buttons[slot]) & bit) {
++                    SDL_SendMouseButton(window, slot, (pressed & bit) ? SDL_PRESSED : SDL_RELEASED, buttons[b]);
++                }
++            }
++            mouse_buttons[slot] = pressed;
++        }
++    }
++}
++
++SDL_bool PS5_Mouse_DrawCursor(SDL_Surface *surface)
++{
++    PS5_CursorData *data;
++    SDL_Rect target, clipped;
++    int x, y, row;
++
++    drawn_rect.w = 0;
++    if (!pointer_in_use || !shown_cursor || !(SDL_GetMouse()->cursor_shown)) {
++        return SDL_FALSE;
++    }
++    data = shown_cursor->driverdata;
++    if (!data || surface->format->format != SDL_PIXELFORMAT_ABGR8888) {
++        return SDL_FALSE;
++    }
++    SDL_GetMouseState(&x, &y);
++    target.x = x - data->hot_x;
++    target.y = y - data->hot_y;
++    target.w = data->image->w;
++    target.h = data->image->h;
++    clipped.x = 0;
++    clipped.y = 0;
++    clipped.w = surface->w;
++    clipped.h = surface->h;
++    if (!SDL_IntersectRect(&target, &clipped, &clipped)) {
++        return SDL_FALSE;
++    }
++    if ((size_t)clipped.w * clipped.h > under_cursor_size) {
++        Uint32 *grown = SDL_realloc(under_cursor, (size_t)clipped.w * clipped.h * sizeof(Uint32));
++        if (!grown) {
++            return SDL_FALSE;
++        }
++        under_cursor = grown;
++        under_cursor_size = (size_t)clipped.w * clipped.h;
++    }
++    for (row = 0; row < clipped.h; row++) {
++        Uint32 *pixels = (Uint32 *)((Uint8 *)surface->pixels + (clipped.y + row) * surface->pitch) + clipped.x;
++        const Uint32 *image = (const Uint32 *)((const Uint8 *)data->image->pixels +
++                                               (clipped.y - target.y + row) * data->image->pitch) +
++                              (clipped.x - target.x);
++        int column;
++
++        SDL_memcpy(under_cursor + (size_t)row * clipped.w, pixels, clipped.w * sizeof(Uint32));
++        for (column = 0; column < clipped.w; column++) {
++            if ((image[column] >> 24) >= 0x80) {
++                pixels[column] = image[column];
++            }
++        }
++    }
++    drawn_rect = clipped;
++    return SDL_TRUE;
++}
++
++void PS5_Mouse_UndrawCursor(SDL_Surface *surface)
++{
++    int row;
++
++    for (row = 0; row < drawn_rect.h; row++) {
++        Uint32 *pixels = (Uint32 *)((Uint8 *)surface->pixels + (drawn_rect.y + row) * surface->pitch) + drawn_rect.x;
++        SDL_memcpy(pixels, under_cursor + (size_t)row * drawn_rect.w, drawn_rect.w * sizeof(Uint32));
++    }
++    drawn_rect.w = 0;
++}
++
++#endif /* SDL_VIDEO_DRIVER_PS5 */
++
++/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/ps5/SDL_ps5mouse.h b/src/video/ps5/SDL_ps5mouse.h
+new file mode 100644
+index 00000000..d9ff6196
+--- /dev/null
++++ b/src/video/ps5/SDL_ps5mouse.h
+@@ -0,0 +1,42 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2018 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++
++#ifndef SDL_ps5mouse_h_
++#define SDL_ps5mouse_h_
++
++#include "../../SDL_internal.h"
++
++#include "SDL_surface.h"
++
++/* Sets up the cursor callbacks and opens the connected mice. */
++void PS5_Mouse_Init(void);
++
++/* Sends the mice's motion, buttons and wheel as SDL events. */
++void PS5_Mouse_PumpEvents(void);
++
++/* Draws the current cursor into a frame that is about to be shown; returns whether it did. */
++SDL_bool PS5_Mouse_DrawCursor(SDL_Surface *surface);
++
++/* Puts back the pixels PS5_Mouse_DrawCursor covered. */
++void PS5_Mouse_UndrawCursor(SDL_Surface *surface);
++
++#endif /* SDL_ps5mouse_h_ */
+diff --git a/src/video/ps5/SDL_ps5video.c b/src/video/ps5/SDL_ps5video.c
+index cde02d0e..a08520f6 100644
+--- a/src/video/ps5/SDL_ps5video.c
++++ b/src/video/ps5/SDL_ps5video.c
+@@ -29,6 +29,10 @@
+ #include "SDL_ps5keyboard.h"
+ #include "SDL_ps5remote.h"
+ #include "SDL_ps5osmesa.h"
++#include "SDL_ps5mouse.h"
++
++#include "../../events/SDL_keyboard_c.h"
++#include "../../events/SDL_mouse_c.h"
+ 
+ /* Called with every finished frame before it is shown (the PS5 OpenRCT2 port captures frames
+    for its console tests here). The pixels are SDL_PIXELFORMAT_ABGR8888. */
+@@ -77,12 +81,25 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
+     SDL_Surface *surface;
+     struct kevent evt;
+     int junk;
++    SDL_Rect whole;
++    SDL_bool cursor;
+ 
+     surface = window->surface;
+     if (!surface) {
+         return SDL_SetError("Couldn't find surface for window");
+     }
+ 
++    cursor = PS5_Mouse_DrawCursor(surface);
++    if (cursor) {
++        /* The cursor moves on its own: refresh the whole frame. */
++        whole.x = 0;
++        whole.y = 0;
++        whole.w = surface->w;
++        whole.h = surface->h;
++        rects = &whole;
++        numrects = 1;
++    }
++
+     if (PS5_FrameCallback) {
+         PS5_FrameCallback(surface->pixels, surface->w, surface->h, surface->pitch);
+     }
+@@ -105,6 +122,9 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
+                          (device_data->surface->w - surface->w) / 2,
+                          (device_data->surface->h - surface->h) / 2);
+     }
++    if (cursor) {
++        PS5_Mouse_UndrawCursor(surface);
++    }
+ 
+     if (sceVideoOutSubmitFlip(device_data->handle, idx, 1, frame_id)) {
+         return SDL_SetError("sceVideoOutSubmitFlip: %s", strerror(errno));
+@@ -265,6 +285,7 @@ static int PS5_VideoInit(_THIS)
+     }
+ 
+     SDL_AddVideoDisplay(&display, SDL_FALSE);
++    PS5_Mouse_Init();
+ 
+     return 0;
+ }
+@@ -293,6 +314,8 @@ static void PS5_VideoQuit(_THIS)
+ 
+ static int PS5_CreateWindow(_THIS, SDL_Window *window)
+ {
++    SDL_SetMouseFocus(window);
++    SDL_SetKeyboardFocus(window);
+     return 0;
+ }
+ 
+@@ -309,6 +332,7 @@ static void PS5_DestroyWindow(_THIS, SDL_Window *window)
+ static void PS5_PumpEvents(_THIS)
+ {
+     PS5_Keyboard_PumpEvents();
++    PS5_Mouse_PumpEvents();
+     PS5_Remote_PumpEvents();
+ }
+ 

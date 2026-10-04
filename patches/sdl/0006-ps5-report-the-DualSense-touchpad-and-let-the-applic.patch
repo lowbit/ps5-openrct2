@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:22:01 +0200
+Subject: [PATCH] ps5: report the DualSense touchpad, and let the application
+ see pad states
+
+The touchpad's two fingers go through SDL's game controller touchpad API. PS5_PadCallback, when
+set, sees each state read from a controller before SDL does (for scripted tests).
+---
+ src/joystick/ps5/SDL_ps5joystick.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/src/joystick/ps5/SDL_ps5joystick.c b/src/joystick/ps5/SDL_ps5joystick.c
+index 4cf0a154..7d64db92 100644
+--- a/src/joystick/ps5/SDL_ps5joystick.c
++++ b/src/joystick/ps5/SDL_ps5joystick.c
+@@ -210,6 +210,14 @@ static SDL_bool PS5_JoystickGetGamepadMapping(int device_index, SDL_GamepadMappi
+ 
+ 
+ 
++/* Called with each state read from a controller, before SDL looks at it: the PS5 OpenRCT2 port's
++   console tests drive the game through it. */
++void (*PS5_PadCallback)(PS5_PadData *pad);
++
++/* The DualSense touchpad's coordinate range. */
++#define PS5_TOUCHPAD_WIDTH 1920.0f
++#define PS5_TOUCHPAD_HEIGHT 1080.0f
++
+ static void PS5_JoystickUpdate(SDL_Joystick *joystick)
+ {
+     PS5_PadContext *ctx = PS5_JoystickGetPadContext(joystick);
+@@ -228,6 +236,21 @@ static void PS5_JoystickUpdate(SDL_Joystick *joystick)
+         SDL_SetError("scePadReadState: 0x%08x", err);
+         return;
+     }
++    if (PS5_PadCallback) {
++        PS5_PadCallback(&pad);
++    }
++
++    // Touchpad
++    for (int finger = 0; finger < (int)SDL_arraysize(pad.touch.touch); finger++) {
++        const PS5_PadTouch *touch = &pad.touch.touch[finger];
++
++        if (finger < pad.touch.fingers) {
++            SDL_PrivateJoystickTouchpad(joystick, 0, finger, SDL_PRESSED, touch->x / PS5_TOUCHPAD_WIDTH,
++                                        touch->y / PS5_TOUCHPAD_HEIGHT, 1.0f);
++        } else if (finger < ctx->pad.touch.fingers) {
++            SDL_PrivateJoystickTouchpad(joystick, 0, finger, SDL_RELEASED, 0.0f, 0.0f, 0.0f);
++        }
++    }
+ 
+     // Axes
+     if (ctx->pad.leftStick.x != pad.leftStick.x) {
+@@ -369,6 +392,7 @@ static int PS5_JoystickOpen(SDL_Joystick *joystick, int device_index)
+     joystick->naxes = 6;
+     joystick->nhats = 1;
+     joystick->instance_id = ctx->instance_id;
++    SDL_PrivateJoystickAddTouchpad(joystick, SDL_arraysize(ctx->pad.touch.touch));
+ 
+     return 0;
+ }

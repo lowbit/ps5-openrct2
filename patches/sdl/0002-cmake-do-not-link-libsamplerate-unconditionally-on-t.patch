@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:22:14 +0200
+Subject: [PATCH] cmake: do not link libsamplerate unconditionally on the PS5
+
+The PS5 audio driver does not use it, and with SDL_LIBSAMPLERATE off it is not built.
+---
+ CMakeLists.txt | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1992a1ea..3873b0b5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1482,7 +1482,6 @@ elseif(PS5)
+     set(SOURCE_FILES ${SOURCE_FILES} ${PS5_AUDIO_SOURCES})
+     set(HAVE_SDL_AUDIO TRUE)
+     list(APPEND EXTRA_LIBS SceAudioOut)
+-    list(APPEND EXTRA_LIBS samplerate) # FIXME
+   endif()
+   if (SDL_VIDEO)
+     set(SDL_VIDEO_DRIVER_PS5 1)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds what tools/ps5-link adds to every PS5 link: the CRT (the native-app boilerplate's
 # app_crt.cpp), libps5runtime.a from src/runtime, and the system module stubs a game title may
-# import (the SDK's, without the WebKit and Mono modules a game process does not load).
+# import (the SDK's, without the WebKit and Mono modules a game process does not load, plus
+# stubs made from src/runtime/stubs for modules the SDK lacks).
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -16,6 +17,14 @@ for stub in "$sdk"/target/lib/*.so; do
     libScePosixForWebKit.so | libmonosgen-2.0.so) ;;
     *) cp "$stub" "$prefix/stubs/" ;;
     esac
+done
+
+# Modules the SDK has no stubs for: src/runtime/stubs/<module>.txt lists the functions used.
+for list in "$root"/src/runtime/stubs/*.txt; do
+    module=$(basename "$list" .txt)
+    sed 's/.*/void &(void) {}/' "$list" >"$build/$module.c"
+    "$root/tools/ps5-cc" -c "$build/$module.c" -o "$build/$module.o"
+    "$sdk/bin/prospero-lld" --shared -soname "$module.prx" -o "$prefix/stubs/$module.so" "$build/$module.o"
 done
 
 # Outputs are replaced only when they change, so the game relinks only then.

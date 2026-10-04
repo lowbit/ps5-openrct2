@@ -1,0 +1,265 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:45:55 +0200
+Subject: [PATCH] Drive the pointer with a game controller on the PS5
+
+GamepadPointer moves the real mouse pointer with the left stick and the touchpad (a stroke
+across the touchpad crosses the window), and sends ordinary mouse button events for Cross (left)
+and Square (right); a touchpad click is a left click too, and holding Circle moves the pointer
+faster. Everything else then works as with a mouse. On the PS5 the right stick takes over the
+analogue map scrolling.
+---
+ src/openrct2-ui/input/GamepadPointer.cpp | 127 +++++++++++++++++++++++
+ src/openrct2-ui/input/GamepadPointer.h   |  45 ++++++++
+ src/openrct2-ui/input/InputManager.cpp   |  16 ++-
+ src/openrct2-ui/input/InputManager.h     |   3 +
+ 4 files changed, 189 insertions(+), 2 deletions(-)
+ create mode 100644 src/openrct2-ui/input/GamepadPointer.cpp
+ create mode 100644 src/openrct2-ui/input/GamepadPointer.h
+
+diff --git a/src/openrct2-ui/input/GamepadPointer.cpp b/src/openrct2-ui/input/GamepadPointer.cpp
+new file mode 100644
+index 0000000..9ead31e
+--- /dev/null
++++ b/src/openrct2-ui/input/GamepadPointer.cpp
+@@ -0,0 +1,127 @@
++/*****************************************************************************
++ * Copyright (c) 2014-2026 OpenRCT2 developers
++ *
++ * For a complete list of all authors, please refer to contributors.md
++ * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
++ *
++ * OpenRCT2 is licensed under the GNU General Public License version 3.
++ *****************************************************************************/
++
++#include "GamepadPointer.h"
++
++#include <SDL.h>
++#include <algorithm>
++#include <cmath>
++
++namespace OpenRCT2::Ui
++{
++    // Below this tilt the stick counts as centred: worn sticks drift.
++    static constexpr float kDeadzone = 7000.0f;
++    // At full tilt the pointer crosses the window's height in this time.
++    static constexpr float kSecondsPerHeight = 1.2f;
++    // Holding Circle (B) multiplies the speed by this.
++    static constexpr float kFastFactor = 2.5f;
++    // The longest frame the movement accounts for, so a stall does not throw the pointer away.
++    static constexpr float kMaxFrameSeconds = 0.1f;
++
++    void GamepadPointer::update(const std::vector<SDL_GameController*>& controllers)
++    {
++        const uint32_t ticks = SDL_GetTicks();
++        const float seconds = _lastTicks == 0 ? 0.0f : std::min((ticks - _lastTicks) / 1000.0f, kMaxFrameSeconds);
++        _lastTicks = ticks;
++
++        SDL_Window* window = SDL_GetMouseFocus();
++        if (window == nullptr)
++            return;
++        int width, height;
++        SDL_GetWindowSize(window, &width, &height);
++        if (!_placed)
++        {
++            // Start in the middle rather than in a corner.
++            SDL_WarpMouseInWindow(window, width / 2, height / 2);
++            _placed = true;
++        }
++
++        float moveX = 0.0f;
++        float moveY = 0.0f;
++        bool left = false;
++        bool right = false;
++        bool touching = false;
++        float touchX = 0.0f;
++        float touchY = 0.0f;
++        for (auto* controller : controllers)
++        {
++            const float x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
++            const float y = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
++            const float magnitude = std::hypot(x, y);
++            if (magnitude > kDeadzone)
++            {
++                // Quadratic response: slow and precise near the centre, fast at full tilt.
++                const float tilt = std::min((magnitude - kDeadzone) / (32767.0f - kDeadzone), 1.0f);
++                float speed = tilt * tilt * height / kSecondsPerHeight;
++                if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B))
++                    speed *= kFastFactor;
++                moveX += x / magnitude * speed * seconds;
++                moveY += y / magnitude * speed * seconds;
++            }
++
++            left |= SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)
++                || SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_TOUCHPAD);
++            right |= SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X);
++
++            uint8_t state = 0;
++            float fingerX, fingerY, pressure;
++            if (!touching && SDL_GameControllerGetNumTouchpads(controller) > 0
++                && SDL_GameControllerGetTouchpadFinger(controller, 0, 0, &state, &fingerX, &fingerY, &pressure) == 0
++                && state != 0)
++            {
++                touching = true;
++                touchX = fingerX;
++                touchY = fingerY;
++            }
++        }
++
++        // The touchpad works like a laptop's: a stroke across all of it crosses the window.
++        if (touching && _touching)
++        {
++            moveX += (touchX - _touchX) * width;
++            moveY += (touchY - _touchY) * height;
++        }
++        _touching = touching;
++        _touchX = touchX;
++        _touchY = touchY;
++
++        _remainderX += moveX;
++        _remainderY += moveY;
++        const int stepX = static_cast<int>(_remainderX);
++        const int stepY = static_cast<int>(_remainderY);
++        _remainderX -= stepX;
++        _remainderY -= stepY;
++        if (stepX != 0 || stepY != 0)
++        {
++            int x, y;
++            SDL_GetMouseState(&x, &y);
++            SDL_WarpMouseInWindow(window, std::clamp(x + stepX, 0, width - 1), std::clamp(y + stepY, 0, height - 1));
++        }
++
++        setButton(window, SDL_BUTTON_LEFT, left, _left);
++        setButton(window, SDL_BUTTON_RIGHT, right, _right);
++    }
++
++    void GamepadPointer::setButton(SDL_Window* window, uint8_t button, bool pressed, bool& state)
++    {
++        if (pressed == state)
++            return;
++        state = pressed;
++
++        SDL_Event e{};
++        e.button.type = pressed ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
++        e.button.timestamp = SDL_GetTicks();
++        e.button.windowID = SDL_GetWindowID(window);
++        e.button.button = button;
++        e.button.state = pressed ? SDL_PRESSED : SDL_RELEASED;
++        e.button.clicks = 1;
++        SDL_GetMouseState(&e.button.x, &e.button.y);
++        SDL_PushEvent(&e);
++    }
++} // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/GamepadPointer.h b/src/openrct2-ui/input/GamepadPointer.h
+new file mode 100644
+index 0000000..fed4706
+--- /dev/null
++++ b/src/openrct2-ui/input/GamepadPointer.h
+@@ -0,0 +1,45 @@
++/*****************************************************************************
++ * Copyright (c) 2014-2026 OpenRCT2 developers
++ *
++ * For a complete list of all authors, please refer to contributors.md
++ * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
++ *
++ * OpenRCT2 is licensed under the GNU General Public License version 3.
++ *****************************************************************************/
++
++#pragma once
++
++#include <cstdint>
++#include <vector>
++
++typedef struct _SDL_GameController SDL_GameController;
++struct SDL_Window;
++
++namespace OpenRCT2::Ui
++{
++    /**
++     * Drives the mouse pointer with a game controller, for platforms played without a mouse:
++     * the left stick and the touchpad move it, Cross (A) and a touchpad click are the left
++     * button, Square (X) the right button, and holding Circle (B) moves it faster. It moves the
++     * real pointer and sends ordinary mouse button events, so everything else works as with a
++     * mouse.
++     */
++    class GamepadPointer final
++    {
++    public:
++        void update(const std::vector<SDL_GameController*>& controllers);
++
++    private:
++        uint32_t _lastTicks = 0;
++        bool _placed = false;
++        float _remainderX = 0.0f;
++        float _remainderY = 0.0f;
++        bool _touching = false;
++        float _touchX = 0.0f;
++        float _touchY = 0.0f;
++        bool _left = false;
++        bool _right = false;
++
++        void setButton(SDL_Window* window, uint8_t button, bool pressed, bool& state);
++    };
++} // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/InputManager.cpp b/src/openrct2-ui/input/InputManager.cpp
+index 4ce8f86..364660f 100644
+--- a/src/openrct2-ui/input/InputManager.cpp
++++ b/src/openrct2-ui/input/InputManager.cpp
+@@ -136,6 +136,15 @@ void InputManager::checkJoysticks()
+     }
+ }
+ 
++#ifdef __PROSPERO__
++// The left stick drives the pointer (GamepadPointer), so the right one scrolls.
++static constexpr auto kScrollAxisX = SDL_CONTROLLER_AXIS_RIGHTX;
++static constexpr auto kScrollAxisY = SDL_CONTROLLER_AXIS_RIGHTY;
++#else
++static constexpr auto kScrollAxisX = SDL_CONTROLLER_AXIS_LEFTX;
++static constexpr auto kScrollAxisY = SDL_CONTROLLER_AXIS_LEFTY;
++#endif
++
+ void InputManager::processAnalogueInput()
+ {
+     _analogueScroll.x = 0;
+@@ -148,8 +157,8 @@ void InputManager::processAnalogueInput()
+     {
+         if (gameController != nullptr)
+         {
+-            int32_t stickX = SDL_GameControllerGetAxis(gameController, SDL_CONTROLLER_AXIS_LEFTX);
+-            int32_t stickY = SDL_GameControllerGetAxis(gameController, SDL_CONTROLLER_AXIS_LEFTY);
++            int32_t stickX = SDL_GameControllerGetAxis(gameController, kScrollAxisX);
++            int32_t stickY = SDL_GameControllerGetAxis(gameController, kScrollAxisY);
+ 
+             // Calculate the magnitude of the stick input vector
+             float magnitude = std::sqrt(static_cast<float>(stickX * stickX + stickY * stickY));
+@@ -199,6 +208,9 @@ void InputManager::updateAnalogueScroll()
+ void InputManager::process()
+ {
+     checkJoysticks();
++#ifdef __PROSPERO__
++    _gamepadPointer.update(_gameControllers);
++#endif
+     processAnalogueInput();
+     handleModifiers();
+     processEvents();
+diff --git a/src/openrct2-ui/input/InputManager.h b/src/openrct2-ui/input/InputManager.h
+index 7a4eccf..f4e3fb9 100644
+--- a/src/openrct2-ui/input/InputManager.h
++++ b/src/openrct2-ui/input/InputManager.h
+@@ -9,6 +9,8 @@
+ 
+ #pragma once
+ 
++#include "GamepadPointer.h"
++
+ #include <openrct2/interface/ScreenCoords.hpp>
+ #include <queue>
+ #include <string_view>
+@@ -59,6 +61,7 @@ namespace OpenRCT2::Ui
+     private:
+         uint32_t _lastJoystickCheck{};
+         std::vector<SDL_GameController*> _gameControllers;
++        GamepadPointer _gamepadPointer;
+         std::queue<InputEvent> _events;
+         ScreenCoordsXY _viewScroll;
+         ScreenCoordsXY _analogueScroll;     // analogue stick scroll values

@@ -1,3 +1,15 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:22:14 +0200
+Subject: [PATCH] ps5: build without the dynamic API, as the title links SDL
+ statically
+
+---
+ src/dynapi/SDL_dynapi.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/dynapi/SDL_dynapi.h b/src/dynapi/SDL_dynapi.h
+index b5c9cbbe..efada17a 100644
 --- a/src/dynapi/SDL_dynapi.h
 +++ b/src/dynapi/SDL_dynapi.h
 @@ -67,6 +67,8 @@

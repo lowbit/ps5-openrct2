@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:45:55 +0200
+Subject: [PATCH] Bind the DualSense's other buttons to shortcuts by default on
+ the PS5
+
+Triangle closes all floating windows, L1 and R1 rotate the view, L2 and R2 zoom, and the d-pad
+scrolls. They are ordinary bindings, shown in the shortcut window and changeable there.
+---
+ src/openrct2-ui/input/Shortcuts.cpp | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/src/openrct2-ui/input/Shortcuts.cpp b/src/openrct2-ui/input/Shortcuts.cpp
+index b2cf649..e3a2868 100644
+--- a/src/openrct2-ui/input/Shortcuts.cpp
++++ b/src/openrct2-ui/input/Shortcuts.cpp
+@@ -919,4 +919,29 @@ void ShortcutManager::registerDefaultShortcuts()
+         }
+     });
+     // clang-format on
++
++#ifdef __PROSPERO__
++    // The PS5 is played with a DualSense. The left stick, Cross, Square, Circle and the touchpad
++    // drive the pointer (GamepadPointer) and the right stick scrolls; these are the other buttons.
++    // JOY numbers count from 1 in SDL's PS5 button order.
++    static constexpr std::pair<std::string_view, std::string_view> kControllerDefaults[] = {
++        { ShortcutId::kInterfaceCloseAll, "JOY 4" },                   // Triangle
++        { ShortcutId::kViewGeneralRotateAnticlockwise, "JOY 10" },     // L1
++        { ShortcutId::kViewGeneralRotateClockwise, "JOY 11" },         // R1
++        { ShortcutId::kViewGeneralZoomOut, "JOY 16" },                 // L2
++        { ShortcutId::kViewGeneralZoomIn, "JOY 17" },                  // R2
++        { ShortcutId::kViewScrollUp, "JOY UP" },
++        { ShortcutId::kViewScrollDown, "JOY DOWN" },
++        { ShortcutId::kViewScrollLeft, "JOY LEFT" },
++        { ShortcutId::kViewScrollRight, "JOY RIGHT" },
++    };
++    for (const auto& [id, chord] : kControllerDefaults)
++    {
++        if (auto* shortcut = getShortcut(id))
++        {
++            shortcut->standard.emplace_back(chord);
++            shortcut->current = shortcut->standard;
++        }
++    }
++#endif
+ }

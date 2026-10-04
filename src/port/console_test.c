@@ -7,6 +7,8 @@
  *   list PATH        log the folder's entries (the first 20) and their count
  *   stat PATH        log what stat says about PATH
  *   arg ARGUMENT     pass ARGUMENT to OpenRCT2's command line (e.g. --verbose)
+ *   input SCRIPT     controller input (see pad_script.c), frames counted like capture's
+ *   point N X Y      put the pointer at window pixel X, Y at frame N
  * The runner connects whenever it likes and gets what is queued: for each item a 32-bit name
  * length, the name, a 64-bit size and the data, then a zero name length. Frames are named
  * frame<N>-<width>x<height> and hold raw RGBA rows. */
@@ -23,6 +25,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "pad_script.h"
 #include "ps5.h"
 #include "ps5runtime.h"
 
@@ -31,10 +34,12 @@
 #define MAX_CAPTURES 64
 #define MAX_QUEUED 16
 #define MAX_ARGUMENTS 8
+#define MAX_POINTS 32
 
 int sceKernelUsleep(unsigned microseconds);
 
 extern void (*PS5_FrameCallback)(const void *pixels, int width, int height, int pitch);
+extern void (*PS5_PadCallback)(ps5_pad_t *pad);
 
 typedef struct
 {
@@ -49,6 +54,11 @@ static int frame_limit;
 static int frame;
 static char arguments[MAX_ARGUMENTS][128];
 static int argument_count;
+static struct
+{
+    int frame, x, y;
+} points[MAX_POINTS];
+static int point_count;
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static item_t queue[MAX_QUEUED];
@@ -260,6 +270,9 @@ static void on_frame(const void *pixels, int width, int height, int pitch)
     frame++;
     if (frame == 60)
         log_video_state();
+    for (int i = 0; i < point_count; i++)
+        if (points[i].frame == frame)
+            SDL_WarpMouseInWindow(SDL_GetMouseFocus(), points[i].x, points[i].y);
     if (capturing(frame) && listener >= 0)
     {
         size_t row = (size_t)width * 4;
@@ -281,6 +294,11 @@ static void on_frame(const void *pixels, int width, int height, int pitch)
         ps5_console_test_finish();
         exit(0);
     }
+}
+
+static void on_pad(ps5_pad_t *pad)
+{
+    pad_script_apply(frame, pad);
 }
 
 void ps5_console_test_start(void)
@@ -329,6 +347,14 @@ void ps5_console_test_start(void)
             printf("test: stat %s = %d (errno %d, size %lld, mode %o)\n", line + 5, result, result != 0 ? errno : 0,
                    result == 0 ? (long long)info.st_size : -1LL, result == 0 ? (unsigned)info.st_mode : 0u);
         }
+        else if (strncmp(line, "point ", 6) == 0 && point_count < MAX_POINTS)
+        {
+            if (sscanf(line + 6, "%d %d %d", &points[point_count].frame, &points[point_count].x,
+                       &points[point_count].y) == 3)
+                point_count++;
+        }
+        else if (strncmp(line, "input ", 6) == 0)
+            pad_script_add(line + 6);
         else if (strncmp(line, "arg ", 4) == 0 && argument_count < MAX_ARGUMENTS)
             snprintf(arguments[argument_count++], sizeof(arguments[0]), "%s", line + 4);
     }
@@ -337,6 +363,7 @@ void ps5_console_test_start(void)
     if (port > 0)
         start_server(port);
     PS5_FrameCallback = on_frame;
+    PS5_PadCallback = on_pad;
 }
 
 int ps5_console_test_arguments(const char **out, int max)

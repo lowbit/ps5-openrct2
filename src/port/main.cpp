@@ -8,11 +8,8 @@
 #include <SDL.h>
 #include <cstdio>
 #include <openrct2-ui/Ui.h>
-#include <pthread.h>
 #include <sys/stat.h>
 #include <vector>
-
-extern "C" int sceSysmoduleLoadModule(unsigned id);
 
 namespace
 {
@@ -33,33 +30,6 @@ namespace
             std::fclose(file);
         }
     }
-
-    // System modules SDL calls that a native title does not get loaded for it: their imports stay
-    // null until the module is loaded.
-    void LoadSystemModules()
-    {
-        constexpr struct
-        {
-            const char* name;
-            unsigned id;
-        } kModules[] = { { "keyboard", 0x0106 }, { "IME dialog", 0x0096 } };
-        for (const auto& module : kModules)
-        {
-            int result = sceSysmoduleLoadModule(module.id);
-            if (result != 0)
-                std::printf("ps5: loading the %s module failed: %#x\n", module.name, static_cast<unsigned>(result));
-        }
-    }
-
-    void LogDefaultThreadStack()
-    {
-        pthread_attr_t attributes;
-        size_t size = 0;
-        pthread_attr_init(&attributes);
-        pthread_attr_getstacksize(&attributes, &size);
-        pthread_attr_destroy(&attributes);
-        std::printf("ps5: default thread stack %zu KiB\n", size / 1024);
-    }
 } // namespace
 
 int main()
@@ -67,8 +37,6 @@ int main()
     // The title folder, where the PC can read the log even after a crash, unless it is read-only.
     const char* logPaths[] = { "/app0/openrct2.log", "/download0/openrct2.log" };
     ps5_log_open(logPaths, 2);
-    LogDefaultThreadStack();
-    LoadSystemModules();
     ps5_console_test_start();
     WriteDefaultConfig();
     // The PS5 SDL has only the software renderer, and OpenRCT2 asks for an accelerated one.

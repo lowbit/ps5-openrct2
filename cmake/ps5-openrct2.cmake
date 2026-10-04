@@ -1,7 +1,7 @@
 # Included into OpenRCT2's project (CMAKE_PROJECT_INCLUDE) by tools/build-ps5.sh: compiles against
-# the static ICU and adds the PS5 port's sources to the openrct2 target once OpenRCT2's CMake
+# the static ICU (with 16-bit wchar_t, as on the console) and adds the PS5 port's sources to the openrct2 target once OpenRCT2's CMake
 # files have defined it.
-add_compile_definitions(U_STATIC_IMPLEMENTATION)
+add_compile_definitions(U_STATIC_IMPLEMENTATION U_SIZEOF_WCHAR_T=2)
 
 function(ps5_port)
     file(GLOB port_sources CONFIGURE_DEPENDS "${PS5_PORT_ROOT}/src/port/*.cpp" "${PS5_PORT_ROOT}/src/port/*.c")

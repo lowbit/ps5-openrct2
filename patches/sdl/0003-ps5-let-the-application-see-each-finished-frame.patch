@@ -1,3 +1,15 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:22:14 +0200
+Subject: [PATCH] ps5: let the application see each finished frame
+
+PS5_FrameCallback, when set, is called with the window surface before it is shown (the PS5 OpenRCT2 port captures frames for its console tests there).
+---
+ src/video/ps5/SDL_ps5video.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/video/ps5/SDL_ps5video.c b/src/video/ps5/SDL_ps5video.c
+index a62be0e8..2e79cbd2 100644
 --- a/src/video/ps5/SDL_ps5video.c
 +++ b/src/video/ps5/SDL_ps5video.c
 @@ -30,6 +30,10 @@
@@ -11,7 +23,7 @@
  static void PS5_DestroyWindowFramebuffer(_THIS, SDL_Window *window)
  {
      SDL_Surface *surface;
-@@ -79,6 +83,10 @@
+@@ -79,6 +83,10 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
          return SDL_SetError("Couldn't find surface for window");
      }
  
