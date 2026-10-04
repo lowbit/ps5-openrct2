@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:48:38 +0200
+Subject: [PATCH] Open the PS5 on-screen keyboard with the text being edited
+
+The IME dialog starts with the text box's contents and length limit, and its result replaces
+them, so renaming a park or a ride edits the old name instead of appending to it.
+---
+ src/openrct2-ui/TextComposition.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/openrct2-ui/TextComposition.cpp b/src/openrct2-ui/TextComposition.cpp
+index b6034c2..7e61414 100644
+--- a/src/openrct2-ui/TextComposition.cpp
++++ b/src/openrct2-ui/TextComposition.cpp
+@@ -35,8 +35,17 @@ bool TextComposition::IsActive()
+     return SDL_IsTextInputActive() && _session.Buffer != nullptr;
+ }
+ 
++#ifdef __PROSPERO__
++// From SDL's PS5 driver: the on-screen keyboard that SDL_StartTextInput opens starts with this
++// text, and its result replaces it.
++extern "C" void PS5_SetScreenKeyboardText(const char* text, int maxLength);
++#endif
++
+ TextInputSession* TextComposition::Start(u8string& buffer, size_t maxLength)
+ {
++#ifdef __PROSPERO__
++    PS5_SetScreenKeyboardText(buffer.c_str(), static_cast<int>(maxLength));
++#endif
+     SDL_StartTextInput();
+     _session.Buffer = &buffer;
+     _session.MaxLength = maxLength;

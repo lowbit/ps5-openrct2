@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 20:48:38 +0200
+Subject: [PATCH] ps5: text from USB keyboards, and a screen keyboard that
+ edits the application's text
+
+The keyboard library reports keys only, so while text input is on, keys also send the text they
+type on a US layout. PS5_SetScreenKeyboardText gives the next IME dialog the application's
+current text and length limit; when the dialog is accepted, that text is deleted (End, then
+Backspace once per character) before the result is sent. A key slot that changed straight from
+one key to another sent the release but not the new press.
+---
+ src/video/ps5/SDL_ps5keyboard.c | 72 +++++++++++++++++++++++++++++++--
+ src/video/ps5/SDL_ps5keyboard.h |  4 ++
+ 2 files changed, 73 insertions(+), 3 deletions(-)
+
+diff --git a/src/video/ps5/SDL_ps5keyboard.c b/src/video/ps5/SDL_ps5keyboard.c
+index 9a413700..9428aa6f 100644
+--- a/src/video/ps5/SDL_ps5keyboard.c
++++ b/src/video/ps5/SDL_ps5keyboard.c
+@@ -131,6 +131,13 @@ static SceImeDialogStatus g_ime_dialog_status = SCE_IME_DIALOG_STATUS_NONE;
+ static wchar_t g_ime_dialog_title[0x80] = {0};
+ static wchar_t g_ime_dialog_text[0x800] = {0};
+ 
++/* Text the next screen keyboard starts with (UTF-8), and its length limit in characters; see
++   PS5_SetScreenKeyboardText. */
++static char *g_ime_initial_text;
++static uint32_t g_ime_max_length;
++/* Characters of the application's text the open dialog's result replaces. */
++static size_t g_ime_replaced;
++
+ static SceImeDialogParam g_ime_dialog_param =
+ {
+     .title = g_ime_dialog_title,
+@@ -230,6 +237,15 @@ static int PS5_ImeDialog_PumpEvents(void)
+ 
+     switch (result.outcome) {
+     case SCE_IME_DIALOG_END_STATUS_OK:
++        /* The dialog edited the application's text: delete that before sending the result. */
++        if (g_ime_replaced > 0) {
++            SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_END);
++            SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_END);
++            for (size_t i = 0; i < g_ime_replaced; i++) {
++                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_BACKSPACE);
++                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_BACKSPACE);
++            }
++        }
+         /* The dialog returns UTF-16 (wchar_t has 16 bits on the PS5). */
+         text = SDL_iconv_string("UTF-8", "UTF-16LE", (const char *)g_ime_dialog_text,
+                                 SDL_wcslen(g_ime_dialog_text) * sizeof(g_ime_dialog_text[0]));
+@@ -252,6 +268,31 @@ static int PS5_ImeDialog_PumpEvents(void)
+     return 0;
+ }
+ 
++/* The text a key types on a US layout keyboard: the PS5 keyboard library reports keys only. */
++static void PS5_SendKeyText(int scancode, SDL_bool shift)
++{
++    static const char digits[] = "1234567890";
++    static const char shifted_digits[] = "!@#$%^&*()";
++    static const char symbols[] = " -=[]\\#;'`,./";
++    static const char shifted_symbols[] = " _+{}|~:\"~<>?";
++    /* Keypad Enter (no text) between + and 1. */
++    static const char keypad[] = "/*-+\0" "1234567890.";
++    char text[2] = { 0, 0 };
++
++    if (scancode >= SDL_SCANCODE_A && scancode <= SDL_SCANCODE_Z) {
++        text[0] = (char)((shift ? 'A' : 'a') + (scancode - SDL_SCANCODE_A));
++    } else if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_0) {
++        text[0] = (shift ? shifted_digits : digits)[scancode - SDL_SCANCODE_1];
++    } else if (scancode >= SDL_SCANCODE_SPACE && scancode <= SDL_SCANCODE_SLASH) {
++        text[0] = (shift ? shifted_symbols : symbols)[scancode - SDL_SCANCODE_SPACE];
++    } else if (scancode >= SDL_SCANCODE_KP_DIVIDE && scancode <= SDL_SCANCODE_KP_PERIOD) {
++        text[0] = keypad[scancode - SDL_SCANCODE_KP_DIVIDE];
++    }
++    if (text[0] != 0) {
++        SDL_SendKeyboardText(text);
++    }
++}
++
+ int PS5_Keyboard_PumpEvents(void)
+ {
+     keyboard_state_t curr;
+@@ -338,11 +379,15 @@ int PS5_Keyboard_PumpEvents(void)
+             continue;
+         }
+ 
+-        if (g_prev_keyboard_state.scankey[i] == 0) {
+-            SDL_SendKeyboardKey(SDL_PRESSED, curr.scankey[i]);
+-        } else {
++        if (g_prev_keyboard_state.scankey[i] != 0) {
+             SDL_SendKeyboardKey(SDL_RELEASED, g_prev_keyboard_state.scankey[i]);
+         }
++        if (curr.scankey[i] != 0) {
++            SDL_SendKeyboardKey(SDL_PRESSED, curr.scankey[i]);
++            if (SDL_EventState(SDL_TEXTINPUT, SDL_QUERY)) {
++                PS5_SendKeyText(curr.scankey[i], (curr.modifiers & 0x22) != 0);
++            }
++        }
+     }
+ 
+     memcpy(&g_prev_keyboard_state, &curr, sizeof(curr));
+@@ -355,9 +400,30 @@ SDL_bool PS5_HasScreenKeyboardSupport(_THIS)
+     return SDL_TRUE;
+ }
+ 
++void PS5_SetScreenKeyboardText(const char *text, int max_length)
++{
++    SDL_free(g_ime_initial_text);
++    g_ime_initial_text = text ? SDL_strdup(text) : NULL;
++    g_ime_max_length = max_length > 0 ? (uint32_t)max_length : 0;
++}
++
+ void PS5_ShowScreenKeyboard(_THIS, SDL_Window *window)
+ {
++    const uint32_t capacity = SDL_arraysize(g_ime_dialog_text) - 1;
++
+     memset(g_ime_dialog_text, 0, sizeof(g_ime_dialog_text));
++    g_ime_replaced = 0;
++    if (g_ime_initial_text) {
++        char *wide = SDL_iconv_string("UTF-16LE", "UTF-8", g_ime_initial_text, SDL_strlen(g_ime_initial_text));
++        if (wide) {
++            SDL_memcpy(g_ime_dialog_text, wide, SDL_min(SDL_wcslen((wchar_t *)wide), capacity) * sizeof(wchar_t));
++            SDL_free(wide);
++        }
++        g_ime_replaced = SDL_utf8strlen(g_ime_initial_text);
++        SDL_free(g_ime_initial_text);
++        g_ime_initial_text = NULL;
++    }
++    g_ime_dialog_param.maxTextLength = g_ime_max_length && g_ime_max_length < capacity ? g_ime_max_length : capacity;
+     sceImeDialogInit(&g_ime_dialog_param, NULL);
+ }
+ 
+diff --git a/src/video/ps5/SDL_ps5keyboard.h b/src/video/ps5/SDL_ps5keyboard.h
+index 57c54e9f..435733eb 100644
+--- a/src/video/ps5/SDL_ps5keyboard.h
++++ b/src/video/ps5/SDL_ps5keyboard.h
+@@ -33,6 +33,10 @@ int PS5_Keyboard_Close(void);
+ SDL_bool PS5_HasScreenKeyboardSupport(_THIS);
+ SDL_bool PS5_IsScreenKeyboardShown(_THIS, SDL_Window *window);
+ 
++/* Exported for applications: the next screen keyboard starts with text (UTF-8), which its result
++   then replaces, and takes at most max_length characters (0: no limit of the application's). */
++void PS5_SetScreenKeyboardText(const char *text, int max_length);
++
+ void PS5_ShowScreenKeyboard(_THIS, SDL_Window *window);
+ void PS5_HideScreenKeyboard(_THIS, SDL_Window *window);
+ 

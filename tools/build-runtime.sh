@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds what tools/ps5-link adds to every PS5 link: the CRT (the native-app boilerplate's
 # app_crt.cpp), libps5runtime.a from src/runtime, and the system module stubs a game title may
-# import (the SDK's, without the WebKit and Mono modules a game process does not load, plus
-# stubs made from src/runtime/stubs for modules the SDK lacks).
+# import (the SDK's, without the modules a game process does not load: anything bound to them
+# would be null, so it should fail to link instead; plus stubs made from src/runtime/stubs for
+# modules the SDK lacks).
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -14,7 +15,7 @@ mkdir -p "$prefix/lib" "$prefix/stubs" "$build"
 
 for stub in "$sdk"/target/lib/*.so; do
     case ${stub##*/} in
-    libScePosixForWebKit.so | libmonosgen-2.0.so) ;;
+    libScePosixForWebKit.so | libkernel_sys.so | libkernel_web.so | libmonosgen-2.0.so) ;;
     *) cp "$stub" "$prefix/stubs/" ;;
     esac
 done

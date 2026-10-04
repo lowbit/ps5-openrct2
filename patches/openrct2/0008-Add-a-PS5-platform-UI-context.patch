@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 21:01:16 +0200
+Subject: [PATCH] Add a PS5 platform UI context
+
+The PS5 has no desktop around the game. The Linux context looked for zenity or kdialog through
+popen, which a PS5 game process cannot call (saving a new game crashed). The PS5 context has no
+native file picker, so OpenRCT2 uses its own file browser, and shows messages as system
+notifications.
+---
+ src/openrct2-ui/UiContext.Linux.cpp |  3 +-
+ src/openrct2-ui/UiContext.PS5.cpp   | 91 +++++++++++++++++++++++++++++
+ 2 files changed, 93 insertions(+), 1 deletion(-)
+ create mode 100644 src/openrct2-ui/UiContext.PS5.cpp
+
+diff --git a/src/openrct2-ui/UiContext.Linux.cpp b/src/openrct2-ui/UiContext.Linux.cpp
+index 5dfa045..cebba37 100644
+--- a/src/openrct2-ui/UiContext.Linux.cpp
++++ b/src/openrct2-ui/UiContext.Linux.cpp
+@@ -7,7 +7,8 @@
+  * OpenRCT2 is licensed under the GNU General Public License version 3.
+  *****************************************************************************/
+ 
+-#if (defined(__unix__) || defined(__HAIKU__) || defined(__EMSCRIPTEN__)) && !defined(__ANDROID__) && !defined(__APPLE__)
++#if (defined(__unix__) || defined(__HAIKU__) || defined(__EMSCRIPTEN__)) && !defined(__ANDROID__) && !defined(__APPLE__) \
++    && !defined(__PROSPERO__)
+ 
+     #include "UiContext.h"
+ 
+diff --git a/src/openrct2-ui/UiContext.PS5.cpp b/src/openrct2-ui/UiContext.PS5.cpp
+new file mode 100644
+index 0000000..d1883ba
+--- /dev/null
++++ b/src/openrct2-ui/UiContext.PS5.cpp
+@@ -0,0 +1,91 @@
++/*****************************************************************************
++ * Copyright (c) 2014-2026 OpenRCT2 developers
++ *
++ * For a complete list of all authors, please refer to contributors.md
++ * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
++ *
++ * OpenRCT2 is licensed under the GNU General Public License version 3.
++ *****************************************************************************/
++
++#ifdef __PROSPERO__
++
++    #include "UiContext.h"
++
++    #include <cstring>
++    #include <openrct2/Diagnostic.h>
++    #include <openrct2/ui/UiContext.h>
++
++extern "C" int sceKernelSendNotificationRequest(int device, void* request, size_t size, int blocking);
++
++namespace OpenRCT2::Ui
++{
++    // The PS5 has no desktop around the game: OpenRCT2 uses its own file browser, and messages
++    // become system notifications.
++    class PS5Context final : public IPlatformUiContext
++    {
++    public:
++        void SetWindowIcon(SDL_Window* window) override
++        {
++        }
++
++        bool IsSteamOverlayAttached() override
++        {
++            return false;
++        }
++
++        bool HasMenuSupport() override
++        {
++            return false;
++        }
++
++        int32_t ShowMenuDialog(
++            const std::vector<std::string>& options, const std::string& title, const std::string& text) override
++        {
++            return -1;
++        }
++
++        void ShowMessageBox(SDL_Window* window, const std::string& message) override
++        {
++            LOG_ERROR("%s", message.c_str());
++
++            struct
++            {
++                uint8_t reserved[45];
++                char message[3075];
++            } request{};
++            std::strncpy(request.message, message.c_str(), sizeof(request.message) - 1);
++            sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
++        }
++
++        std::string ShowFileDialog(SDL_Window* window, const FileDialogDesc& desc) override
++        {
++            return {};
++        }
++
++        std::string ShowDirectoryDialog(SDL_Window* window, const std::string& title) override
++        {
++            return {};
++        }
++
++        void OpenFolder(const std::string& path) override
++        {
++        }
++
++        void OpenURL(const std::string& url) override
++        {
++            LOG_INFO("No browser to open %s", url.c_str());
++        }
++
++        bool HasFilePicker() const override
++        {
++            return false;
++        }
++    };
++
++    std::unique_ptr<IPlatformUiContext> CreatePlatformUiContext()
++    {
++        return std::make_unique<PS5Context>();
++    }
++} // namespace OpenRCT2::Ui
++
++#endif // __PROSPERO__

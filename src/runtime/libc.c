@@ -1,7 +1,7 @@
 /* C library functions the native title's libc (libSceLibcInternal) lacks but libc++ and the
  * game's libraries call. The title only ever runs in the "C" locale, so each *_l variant
- * forwards to its plain counterpart. A few POSIX calls exist only in the WebKit POSIX module,
- * which a game process does not load; they are implemented here. */
+ * forwards to its plain counterpart. Some POSIX calls exist only in modules a game process does
+ * not load (the WebKit POSIX module, libkernel_sys); they are implemented here. */
 #include <errno.h>
 #include <fcntl.h>
 #include <fnmatch.h>
@@ -274,7 +274,7 @@ struct tm *gmtime_r(const time_t *time, struct tm *out)
     return copy_time(gmtime, time, out);
 }
 
-/* ---- POSIX calls only the WebKit POSIX module exports ---------------------------------------- */
+/* ---- POSIX calls only modules a game process does not load export ---------------------------- */
 
 int isatty(int fd)
 {
@@ -394,6 +394,13 @@ int mkstemp(char *path)
             return fd;
     }
     errno = EEXIST;
+    return -1;
+}
+
+/* A game process cannot start other programs. */
+pid_t fork(void)
+{
+    errno = ENOSYS;
     return -1;
 }
 
