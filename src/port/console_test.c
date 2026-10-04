@@ -270,6 +270,14 @@ static void on_frame(const void *pixels, int width, int height, int pitch)
     frame++;
     if (frame == 60)
         log_video_state();
+    if (frame % 300 == 0)
+    {
+        static uint32_t last_ticks;
+        uint32_t ticks = SDL_GetTicks();
+        if (last_ticks != 0)
+            printf("test: frame %d, %.1f frames per second\n", frame, 300000.0 / (ticks - last_ticks));
+        last_ticks = ticks;
+    }
     for (int i = 0; i < point_count; i++)
         if (points[i].frame == frame)
             SDL_WarpMouseInWindow(SDL_GetMouseFocus(), points[i].x, points[i].y);

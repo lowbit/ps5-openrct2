@@ -16,8 +16,9 @@ namespace
     constexpr const char* kUserPath = "/download0/user";
     constexpr const char* kConfigPath = "/download0/user/config.ini";
 
-    // On first run: full screen at the TV's resolution, with the interface drawn at twice the size
-    // (OpenRCT2 would otherwise infer the scale from the display's DPI on its first start).
+    // On first run: full screen at the TV's resolution, the interface drawn at twice the size
+    // (OpenRCT2 would otherwise infer the scale from the display's DPI on its first start), and a
+    // frame for every refresh of a 60 Hz TV rather than one per 40 Hz game tick.
     void WriteDefaultConfig()
     {
         struct stat info{};
@@ -26,7 +27,13 @@ namespace
         mkdir(kUserPath, 0755);
         if (auto* file = std::fopen(kConfigPath, "w"))
         {
-            std::fputs("[general]\nfullscreen_mode = 2\nwindow_scale = 2.000000\ninfer_display_dpi = false\n", file);
+            std::fputs(
+                "[general]\n"
+                "fullscreen_mode = 2\n"
+                "window_scale = 2.000000\n"
+                "infer_display_dpi = false\n"
+                "uncap_fps = true\n",
+                file);
             std::fclose(file);
         }
     }
