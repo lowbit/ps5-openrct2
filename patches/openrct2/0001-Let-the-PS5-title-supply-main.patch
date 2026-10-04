@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Sun, 4 Oct 2026 17:51:02 +0200
+Subject: [PATCH] Let the PS5 title supply main
+
+The PS5 port has its own main, which passes the console's data locations, and calls
+NormalisedMain like the Windows DLL proxy does.
+---
+ src/openrct2-ui/Ui.cpp | 5 +++--
+ src/openrct2-ui/Ui.h   | 2 +-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/src/openrct2-ui/Ui.cpp b/src/openrct2-ui/Ui.cpp
+index 64e7ffa..c886c9d 100644
+--- a/src/openrct2-ui/Ui.cpp
++++ b/src/openrct2-ui/Ui.cpp
+@@ -38,9 +38,10 @@ static std::shared_ptr<T> ToShared(std::unique_ptr<T>&& src)
+ }
+ 
+ /**
+- * Main entry point for non-Windows systems. Windows instead uses its own DLL proxy.
++ * Main entry point for non-Windows systems. Windows instead uses its own DLL proxy, and the PS5
++ * its own main that passes the console's data locations.
+  */
+-#if defined(_MSC_VER) && !defined(__DISABLE_DLL_PROXY__)
++#if (defined(_MSC_VER) && !defined(__DISABLE_DLL_PROXY__)) || defined(__PROSPERO__)
+ int NormalisedMain(int argc, const char** argv)
+ #else
+ int main(int argc, const char** argv)
+diff --git a/src/openrct2-ui/Ui.h b/src/openrct2-ui/Ui.h
+index c1576f2..8861347 100644
+--- a/src/openrct2-ui/Ui.h
++++ b/src/openrct2-ui/Ui.h
+@@ -9,6 +9,6 @@
+ 
+ #pragma once
+ 
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) || defined(__PROSPERO__)
+ int NormalisedMain(int argc, const char** argv);
+ #endif

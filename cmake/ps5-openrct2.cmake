@@ -1,0 +1,14 @@
+# Included into OpenRCT2's project (CMAKE_PROJECT_INCLUDE) by tools/build-ps5.sh: compiles against
+# the static ICU and adds the PS5 port's sources to the openrct2 target once OpenRCT2's CMake
+# files have defined it.
+add_compile_definitions(U_STATIC_IMPLEMENTATION)
+
+function(ps5_port)
+    file(GLOB port_sources CONFIGURE_DEPENDS "${PS5_PORT_ROOT}/src/port/*.cpp" "${PS5_PORT_ROOT}/src/port/*.c")
+    target_sources(openrct2 PRIVATE ${port_sources})
+    # Libraries that pkg-config and FindICU name only for static builds.
+    foreach(library icudata vorbis ogg)
+        target_link_libraries(openrct2 "${PS5_PREFIX}/lib/lib${library}.a")
+    endforeach()
+endfunction()
+cmake_language(DEFER CALL ps5_port)

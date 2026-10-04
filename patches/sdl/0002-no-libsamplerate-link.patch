@@ -1,0 +1,10 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1482,7 +1482,6 @@
+     set(SOURCE_FILES ${SOURCE_FILES} ${PS5_AUDIO_SOURCES})
+     set(HAVE_SDL_AUDIO TRUE)
+     list(APPEND EXTRA_LIBS SceAudioOut)
+-    list(APPEND EXTRA_LIBS samplerate) # FIXME
+   endif()
+   if (SDL_VIDEO)
+     set(SDL_VIDEO_DRIVER_PS5 1)

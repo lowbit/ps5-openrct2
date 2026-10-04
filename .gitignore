@@ -1,0 +1,5 @@
+/build/
+/dist/
+/.deps/
+/OpenRCT2/
+__pycache__/

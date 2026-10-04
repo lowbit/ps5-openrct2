@@ -1,0 +1,25 @@
+#!/bin/sh
+# C compiler driver for the PS5 native title: clang 18 with the payload SDK's target flags.
+# Links go to tools/ps5-link, so configure checks and CMake see a complete cross toolchain.
+root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+sdk="$root/.deps/native-app/.deps/native/ps5-payload-sdk"
+
+link=
+inputs=
+for arg; do
+    case $arg in
+    -c | -E | -S | -M | -MM | -dumpversion | -dumpmachine | -print-* | --print-* | -###) link=no ;;
+    *.o | *.obj | *.a | *.c | *.cc | *.cpp | *.cxx | *.C | *.s | *.S) inputs=1 ;;
+    esac
+done
+if [ -z "$link" ] && [ -n "$inputs" ]; then
+    exec "$root/tools/ps5-link" "$@"
+fi
+
+if [ -n "$PS5_CXX" ]; then
+    set -- clang++-18 -isystem "$sdk/target/include/c++/v1" -frtti -fexceptions "$@"
+else
+    set -- clang-18 "$@"
+fi
+exec "$@" -target x86_64-sie-ps5 -fvisibility-nodllstorageclass=default -fPIC -isysroot "$sdk" \
+    -isystem "$sdk/target/include" -fno-stack-protector -fno-plt -femulated-tls

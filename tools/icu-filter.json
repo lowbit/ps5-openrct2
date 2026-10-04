@@ -1,0 +1,15 @@
+{
+  "strategy": "additive",
+  "featureFilters": {
+    "cnvalias": "include",
+    "conversion_mappings": {
+      "includelist": [
+        "ibm-5348_P100-1997",
+        "ibm-943_P15A-2003",
+        "ibm-1383_P110-1999",
+        "windows-949-2000",
+        "windows-950-2000"
+      ]
+    }
+  }
+}

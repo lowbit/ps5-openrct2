@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Links like a compiler driver, but into a PS5 native module: objects, archives and -l libraries
+# go to prospero-lld with the native-app linker script, the port's runtime (CRT, heap, libc
+# additions), libc++ and the system module stubs, and ps5-native-tool turns the result into a
+# module ready for FSELF signing. Source files on the command line are compiled first, as
+# configure scripts expect. tools/ps5-cc calls this whenever it is asked to link.
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+native="$root/.deps/native-app"
+sdk="$native/.deps/native/ps5-payload-sdk"
+prefix="$root/.deps/ps5"
+stubs="$prefix/stubs"
+
+out=a.out
+objects=()
+archives=()
+sources=()
+compile=()
+libdirs=("$prefix/lib")
+lang=
+while (($#)); do
+    arg=$1
+    shift
+    case $arg in
+    -o) out=$1; shift ;;
+    -o*) out=${arg#-o} ;;
+    -L) libdirs+=("$1"); shift ;;
+    -L*) libdirs+=("${arg#-L}") ;;
+    -l)
+        set -- "-l$1" "${@:2}"
+        ;;
+    -l*)
+        name=${arg#-l}
+        found=
+        for dir in "${libdirs[@]}"; do
+            if [[ -f $dir/lib$name.a ]]; then found=$dir/lib$name.a; break; fi
+        done
+        if [[ -n $found ]]; then
+            archives+=("$found")
+        elif [[ -f $stubs/lib$name.so ]]; then
+            : # system modules are always linked
+        else
+            case $name in
+            c | m | pthread | dl | rt | c++ | c++abi | unwind | stdc++ | gcc | gcc_s) ;;
+            *) echo "ps5-link: cannot find -l$name" >&2; exit 1 ;;
+            esac
+        fi
+        ;;
+    -x) lang=$1; compile+=(-x "$1"); shift ;;
+    -isystem | -include | -iquote | -idirafter | -MF | -MT | -MQ) compile+=("$arg" "$1"); shift ;;
+    -D* | -U* | -I* | -std=* | -O* | -f* | -m* | -W[^l]* | -w | -g* | -pedantic*) compile+=("$arg") ;;
+    -Wl,*) ;;
+    -*) ;;
+    *.o | *.obj) objects+=("$arg") ;;
+    *.a) archives+=("$arg") ;;
+    *.c | *.cc | *.cpp | *.cxx | *.C | *.s | *.S) sources+=("$arg") ;;
+    *)
+        if [[ -n $lang && -f $arg ]]; then sources+=("$arg"); fi
+        ;;
+    esac
+done
+
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+
+for source in ${sources[@]+"${sources[@]}"}; do
+    object="$work/${#objects[@]}.o"
+    case $source in
+    *.c | *.s | *.S) cc="$root/tools/ps5-cc" ;;
+    *) cc="$root/tools/ps5-c++" ;;
+    esac
+    [[ -z $lang ]] || cc="$root/tools/ps5-c++"
+    "$cc" ${compile[@]+"${compile[@]}"} -c "$source" -o "$object"
+    objects+=("$object")
+done
+
+builtins=$(clang-18 --print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64.a
+wraps=()
+for symbol in malloc calloc realloc free posix_memalign memalign aligned_alloc malloc_usable_size; do
+    wraps+=("--wrap=$symbol")
+done
+
+"$sdk/bin/prospero-lld" -T "$root/src/runtime/ps5.ld" -L "$native/tooling/native" --eh-frame-hdr --gc-sections \
+    --no-dependent-libraries --error-limit=0 \
+    --version-script "$native/tooling/native/app-symbols.map" -e _start "${wraps[@]}" \
+    -o "$work/pie.elf" "$prefix/lib/ps5-crt.o" ${objects[@]+"${objects[@]}"} \
+    --start-group ${archives[@]+"${archives[@]}"} "$prefix/lib/libps5runtime.a" \
+    "$sdk/target/lib/libc++.a" "$sdk/target/lib/libc++abi.a" "$sdk/target/lib/libunwind.a" \
+    "$builtins" --end-group --as-needed "$stubs"/*.so
+
+"$native/build/host/ps5-native-tool" link --in "$work/pie.elf" --out "$out" --stub-dir "$stubs" \
+    --module-sdk 0x02000009 --companion-sdk 0x08050001 --file-name eboot.elf >/dev/null
