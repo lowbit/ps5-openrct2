@@ -5,12 +5,11 @@ v0.5.5 with the software renderer, on SDL2 from ps5-payload-dev, linked into a P
 native-app boilerplate's tools. The player brings the RCT2 data; none is in this repository.
 
 Status (2026-10-05): runs on the console (FW 13.00) at 1080p: title screen, starting a scenario,
-playing at 56 to 58 frames per second, saving. The DualSense drives a pointer and the shortcuts
-below; Options opens a quick menu of build tools. The import screen shows its address and QR code
-and received files from a PC. Not yet confirmed on hardware: a USB or Bluetooth mouse and keyboard,
-typing in the IME dialog (it opens), the sound, a ZIP import, and a complete import into an empty
-title (the console went to rest mode during that test, after 462 MB at 2.2 MB/s; the server has
-since been changed to speed it up).
+playing at 56 to 58 frames per second, saving, and importing the game files into an empty title
+from a PC (2457 files, 671 MB, in about 2.5 minutes), after which the game starts by itself. The
+DualSense drives a pointer and the shortcuts below; Options opens a quick menu of build tools. Not
+yet confirmed on hardware: a USB or Bluetooth mouse and keyboard, typing in the IME dialog (it
+opens), the sound, a ZIP import, and an import from a phone's browser.
 
 ## Layout
 
@@ -251,7 +250,11 @@ report's list of loaded modules shows which imports can be null.
   `open`, `mkdir`, `rename`, `unlink` and `sceKernelGetdents` work. `/app0` (nullfs) reports every
   inode as 0.
 - `wchar_t` has 16 bits; the default thread stack is 64 KiB; the exit system call ends in SIGSYS.
-- Uploading to the title over HTTP ran at 2.2 MB/s in the first test (ps5upload does about 11).
+- Uploading to the title over HTTP: about 10 MB/s for large files (ps5upload does about 11) and
+  about 30 ms per small file, once the server sets `TCP_NODELAY`. Without it each reply's body
+  waited for Windows' delayed acknowledgement of the head (up to 200 ms), about 105 ms per file,
+  and the whole folder took 7 minutes instead of 2.5 (that run also shared the network with
+  another upload).
 - Rest mode (the TV turned off) stops a running test; the payloads' listening sockets die with it.
 
 ## Game data

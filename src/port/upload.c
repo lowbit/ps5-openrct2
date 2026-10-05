@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -415,6 +416,7 @@ static void handle(int fd)
 static void *serve(void *argument)
 {
     struct timeval receive_timeout = { RECEIVE_TIMEOUT_S, 0 }, send_timeout = { SEND_TIMEOUT_S, 0 };
+    int yes = 1;
 
     (void)argument;
     while (!stopping)
@@ -430,6 +432,9 @@ static void *serve(void *argument)
         {
             setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout));
             setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+            /* A reply is two sends (head, body). With Nagle the body waits until the sender
+             * acknowledges the head, which Windows delays by up to 200 ms per request. */
+            setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
             handle(client);
         }
         close(client);
