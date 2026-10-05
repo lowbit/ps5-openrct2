@@ -1,0 +1,775 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Mon, 5 Oct 2026 09:41:20 +0200
+Subject: [PATCH] Show the build tools and park windows in radial menus on the
+ PS5
+
+Options shows the build tools (rides, paths, scenery, land, water, clear scenery) in a ring in the
+middle of the screen, Triangle the park windows (rides, park, guests, staff, finances, research,
+messages, map) when there is nothing to rotate. The stick or the d-pad points at an entry, whose
+name shows under the ring; letting go of the button runs it. Tapped, the ring stays until Cross
+picks an entry, or Circle or the same button closes it. This replaces the quick menu, which sat at
+the pointer and could open behind the top toolbar.
+
+On the controller: a press on the d-pad inside a list, but not on an item (on a heading, or beside
+a short list), goes to the nearest item that way, or the nearest one. Turning, sloping or banking
+track from a special piece such as a station platform starts from plain track, as the keyboard
+shortcuts do nothing there.
+---
+ src/openrct2-ui/input/Gamepad.cpp      | 144 +++++++++++----
+ src/openrct2-ui/input/Gamepad.h        |  19 +-
+ src/openrct2-ui/windows/QuickMenu.cpp  | 114 ------------
+ src/openrct2-ui/windows/RadialMenu.cpp | 233 +++++++++++++++++++++++++
+ src/openrct2-ui/windows/Windows.h      |  15 +-
+ src/openrct2/interface/WindowClasses.h |   2 +-
+ 6 files changed, 372 insertions(+), 155 deletions(-)
+ delete mode 100644 src/openrct2-ui/windows/QuickMenu.cpp
+ create mode 100644 src/openrct2-ui/windows/RadialMenu.cpp
+
+diff --git a/src/openrct2-ui/input/Gamepad.cpp b/src/openrct2-ui/input/Gamepad.cpp
+index ef52e00..6a2652d 100644
+--- a/src/openrct2-ui/input/Gamepad.cpp
++++ b/src/openrct2-ui/input/Gamepad.cpp
+@@ -17,8 +17,6 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <limits>
+-#include <tuple>
+-#include <utility>
+ #include <openrct2-ui/UiContext.h>
+ #include <openrct2-ui/interface/Dropdown.h>
+ #include <openrct2-ui/interface/Widget.h>
+@@ -30,7 +28,10 @@
+ #include <openrct2/config/Config.h>
+ #include <openrct2/interface/Window.h>
+ #include <openrct2/ride/RideConstruction.h>
++#include <openrct2/ride/ted/TrackElementDescriptor.h>
+ #include <openrct2/ui/WindowManager.h>
++#include <tuple>
++#include <utility>
+ 
+ namespace OpenRCT2::Ui
+ {
+@@ -119,8 +120,7 @@ namespace OpenRCT2::Ui
+     // Windows Circle may close: those with a close button.
+     static bool IsClosable(const WindowBase& w)
+     {
+-        return IsNavigable(w)
+-            && std::any_of(w.widgets.begin(), w.widgets.end(), [](const Widget& widget) {
++        return IsNavigable(w) && std::any_of(w.widgets.begin(), w.widgets.end(), [](const Widget& widget) {
+                    return widget.type == WidgetType::closeBox && widget.isVisible();
+                });
+     }
+@@ -271,7 +271,8 @@ namespace OpenRCT2::Ui
+         ScreenRect onScreen(const ScreenRect& item) const
+         {
+             const auto at = origin();
+-            return { item.Point1 + at, ScreenCoordsXY{ std::min(item.GetRight() + at.x, view.GetRight()), item.GetBottom() + at.y } };
++            return { item.Point1 + at,
++                     ScreenCoordsXY{ std::min(item.GetRight() + at.x, view.GetRight()), item.GetBottom() + at.y } };
+         }
+ 
+         void update()
+@@ -296,7 +297,8 @@ namespace OpenRCT2::Ui
+                 else if (item.GetRight() >= scroll.contentOffsetX + viewWidth)
+                     scroll.contentOffsetX = item.GetRight() + 1 - viewWidth;
+             }
+-            scroll.contentOffsetY = std::clamp<int32_t>(scroll.contentOffsetY, 0, std::max(0, scroll.contentHeight - viewHeight));
++            scroll.contentOffsetY = std::clamp<int32_t>(
++                scroll.contentOffsetY, 0, std::max(0, scroll.contentHeight - viewHeight));
+             scroll.contentOffsetX = std::clamp<int32_t>(scroll.contentOffsetX, 0, std::max(0, scroll.contentWidth - viewWidth));
+             update();
+         }
+@@ -309,8 +311,12 @@ namespace OpenRCT2::Ui
+         const auto& widget = w.widgets[index];
+         const int32_t right = widget.right - (scroll.flags.has(ScrollFlag::vScrollbarVisible) ? kScrollBarWidth + 1 : 1);
+         const int32_t bottom = widget.bottom - (scroll.flags.has(ScrollFlag::hScrollbarVisible) ? kScrollBarWidth + 1 : 1);
+-        return List{ w, index, scroll, w.onScrollGetItems(scrollIndex),
+-                     { w.windowPos + ScreenCoordsXY{ widget.left + 1, widget.top + 1 }, w.windowPos + ScreenCoordsXY{ right, bottom } } };
++        return List{ w,
++                     index,
++                     scroll,
++                     w.onScrollGetItems(scrollIndex),
++                     { w.windowPos + ScreenCoordsXY{ widget.left + 1, widget.top + 1 },
++                       w.windowPos + ScreenCoordsXY{ right, bottom } } };
+     }
+ 
+     static int32_t DistanceSquared(const ScreenRect& rect, const ScreenCoordsXY& point)
+@@ -358,33 +364,32 @@ namespace OpenRCT2::Ui
+             return position;
+         }
+ 
++        // From the item under the pointer, or from the pointer itself when it is on a heading or
++        // beside a short list.
+         const auto contentPosition = position - list.origin();
+-        size_t current = 0;
+-        int32_t currentDistance = std::numeric_limits<int32_t>::max();
+-        for (size_t i = 0; i < list.items.size(); i++)
+-        {
+-            const auto distance = DistanceSquared(list.items[i], contentPosition);
+-            if (distance < currentDistance)
+-            {
+-                current = i;
+-                currentDistance = distance;
+-            }
+-        }
++        const auto current = std::find_if(
++            list.items.begin(), list.items.end(), [&](const ScreenRect& item) { return item.Contains(contentPosition); });
++        const ScreenRect from = current != list.items.end() ? *current : ScreenRect{ contentPosition, contentPosition };
+ 
+         std::optional<size_t> next;
+         int32_t nextDistance = std::numeric_limits<int32_t>::max();
+         for (size_t i = 0; i < list.items.size(); i++)
+         {
+-            if (i == current)
++            if (current != list.items.end() && i == static_cast<size_t>(current - list.items.begin()))
+                 continue;
+-            if (auto distance = Distance(list.items[current], list.items[i], dx, dy); distance && *distance < nextDistance)
++            if (auto distance = Distance(from, list.items[i], dx, dy); distance && *distance < nextDistance)
+             {
+                 next = i;
+                 nextDistance = *distance;
+             }
+         }
+         if (!next)
+-            return std::nullopt;
++        {
++            // Nothing that way: leave the list, unless the pointer is not on an item yet.
++            if (current != list.items.end())
++                return std::nullopt;
++            return EnterList(list, position);
++        }
+ 
+         const auto& item = list.items[*next];
+         list.reveal(item);
+@@ -420,6 +425,15 @@ namespace OpenRCT2::Ui
+             shortcut->action();
+     }
+ 
++    // Turning, sloping or banking from a special piece (a station platform, a loop) starts from
++    // plain track, as clicking the straight piece would; the keyboard shortcuts do nothing there.
++    static void RunTrackShortcut(std::string_view id)
++    {
++        if (_currentlySelectedTrack.isTrackType)
++            RunShortcut(ShortcutId::kWindowRideConstructionDefault);
++        RunShortcut(id);
++    }
++
+     void Gamepad::update(const std::vector<SDL_GameController*>& controllers)
+     {
+         _controllers = controllers;
+@@ -440,6 +454,11 @@ namespace OpenRCT2::Ui
+         }
+ 
+         readButtons();
++        if (RadialMenuShown())
++        {
++            handleRadialMenu();
++            return;
++        }
+         movePointer();
+         handleButtons();
+     }
+@@ -583,14 +602,18 @@ namespace OpenRCT2::Ui
+         if (fired(Button::circle))
+             back();
+ 
+-        if (fired(Button::triangle))
++        // Triangle rotates what is being placed, toggles the chain lift while building track, or shows
++        // the park windows; Options the build tools.
++        const bool inPark = gLegacyScene != LegacyScene::titleSequence;
++        if (fired(Button::triangle) && !RotateConstructionObject())
+         {
+-            if (!RotateConstructionObject() && building == Building::track)
++            if (building == Building::track)
+                 RunShortcut(ShortcutId::kWindowRideConstructionChainLift);
++            else if (inPark)
++                openRadialMenu(RadialMenu::park, Button::triangle);
+         }
+-
+-        if (fired(Button::options) && gLegacyScene != LegacyScene::titleSequence)
+-            QuickMenuToggle();
++        if (fired(Button::options) && inPark)
++            openRadialMenu(RadialMenu::build, Button::options);
+ 
+         // L1 and R1: the tabs of the window under the pointer, banking while building track,
+         // otherwise the view.
+@@ -599,7 +622,8 @@ namespace OpenRCT2::Ui
+             if (!fired(button))
+                 continue;
+             if (building == Building::track)
+-                RunShortcut(step < 0 ? ShortcutId::kWindowRideConstructionBankLeft : ShortcutId::kWindowRideConstructionBankRight);
++                RunTrackShortcut(
++                    step < 0 ? ShortcutId::kWindowRideConstructionBankLeft : ShortcutId::kWindowRideConstructionBankRight);
+             else if (!switchTab(step))
+                 RunShortcut(step < 0 ? ShortcutId::kViewGeneralRotateAnticlockwise : ShortcutId::kViewGeneralRotateClockwise);
+         }
+@@ -616,16 +640,17 @@ namespace OpenRCT2::Ui
+ 
+         // The d-pad: the piece to build, or the next button that way.
+         for (const auto& [button, dx, dy] : { std::tuple{ Button::up, 0, -1 }, std::tuple{ Button::down, 0, 1 },
+-                                             std::tuple{ Button::left, -1, 0 }, std::tuple{ Button::right, 1, 0 } })
++                                              std::tuple{ Button::left, -1, 0 }, std::tuple{ Button::right, 1, 0 } })
+         {
+             if (!fired(button))
+                 continue;
+             if (building != Building::none)
+             {
++                const auto run = building == Building::track ? RunTrackShortcut : RunShortcut;
+                 if (dx != 0)
+-                    RunShortcut(dx < 0 ? ShortcutId::kWindowRideConstructionTurnLeft : ShortcutId::kWindowRideConstructionTurnRight);
++                    run(dx < 0 ? ShortcutId::kWindowRideConstructionTurnLeft : ShortcutId::kWindowRideConstructionTurnRight);
+                 else
+-                    RunShortcut(dy < 0 ? ShortcutId::kWindowRideConstructionSlopeUp : ShortcutId::kWindowRideConstructionSlopeDown);
++                    run(dy < 0 ? ShortcutId::kWindowRideConstructionSlopeUp : ShortcutId::kWindowRideConstructionSlopeDown);
+                 rumble(0, 0x2000, 15);
+             }
+             else
+@@ -635,6 +660,51 @@ namespace OpenRCT2::Ui
+         }
+     }
+ 
++    void Gamepad::openRadialMenu(RadialMenu menu, Button button)
++    {
++        RadialMenuOpen(menu);
++        _radialButton = button;
++        _radialButtonHeld = true;
++        _radialPointed = false;
++        rumble(0, 0x2000, 15);
++    }
++
++    // While a radial menu is shown the stick or the d-pad points at an entry. Letting go of the
++    // button that opened it runs that entry; tapped, the menu stays until Cross picks one, or Circle
++    // or the button again closes it.
++    void Gamepad::handleRadialMenu()
++    {
++        setButton(SDL_BUTTON_LEFT, false, _left);
++        setButton(SDL_BUTTON_RIGHT, false, _right);
++
++        bool pointed = false;
++        const float x = axis(SDL_CONTROLLER_AXIS_LEFTX);
++        const float y = axis(SDL_CONTROLLER_AXIS_LEFTY);
++        if (std::hypot(x, y) > 0.5f)
++            pointed = RadialMenuPoint(x, y);
++        const int dx = held(Button::right) - held(Button::left);
++        const int dy = held(Button::down) - held(Button::up);
++        if ((fired(Button::up) || fired(Button::down) || fired(Button::left) || fired(Button::right)) && (dx != 0 || dy != 0))
++            pointed |= RadialMenuPoint(static_cast<float>(dx), static_cast<float>(dy));
++        if (pointed)
++        {
++            _radialPointed = true;
++            rumble(0, 0x2000, 12);
++        }
++
++        const bool buttonHeld = held(_radialButton);
++        if (fired(Button::cross) || (_radialButtonHeld && !buttonHeld && _radialPointed))
++        {
++            if (RadialMenuChoose())
++                rumble(0x1800, 0x2400, 18);
++        }
++        else if (fired(Button::circle) || fired(_radialButton))
++        {
++            RadialMenuClose();
++        }
++        _radialButtonHeld = buttonHeld;
++    }
++
+     // Circle: closes what is most in the way, one thing per press.
+     void Gamepad::back()
+     {
+@@ -659,7 +729,8 @@ namespace OpenRCT2::Ui
+         if (gInputFlags.has(InputFlag::toolActive))
+         {
+             // The tool windows (scenery, paths, land...) go with their tool.
+-            auto* toolWindow = windowMgr->FindByNumber(gCurrentToolWidget.windowClassification, gCurrentToolWidget.windowNumber);
++            auto* toolWindow = windowMgr->FindByNumber(
++                gCurrentToolWidget.windowClassification, gCurrentToolWidget.windowNumber);
+             switch (gCurrentToolWidget.windowClassification)
+             {
+                 case WindowClass::scenery:
+@@ -730,7 +801,8 @@ namespace OpenRCT2::Ui
+         const auto current = TargetAt(position);
+ 
+         // Within a list or along a slider first.
+-        if (current && current->widget != kWidgetIndexNull && current->window->widgets[current->widget].type == WidgetType::scroll)
++        if (current && current->widget != kWidgetIndexNull
++            && current->window->widgets[current->widget].type == WidgetType::scroll)
+         {
+             auto list = GetList(*current->window, current->widget);
+             if (auto destination = MoveInList(list, position, dx, dy))
+@@ -786,8 +858,7 @@ namespace OpenRCT2::Ui
+     {
+         const auto position = ContextGetCursorState()->position;
+         const auto target = TargetAt(position);
+-        if (!target || target->widget == kWidgetIndexNull
+-            || target->window->widgets[target->widget].type != WidgetType::scroll)
++        if (!target || target->widget == kWidgetIndexNull || target->window->widgets[target->widget].type != WidgetType::scroll)
+             return false;
+ 
+         auto list = GetList(*target->window, target->widget);
+@@ -840,7 +911,8 @@ namespace OpenRCT2::Ui
+             const float tilt = std::min((magnitude - kDeadzone) / (1.0f - kDeadzone), 1.0f);
+             _fullTiltSeconds = tilt > 0.95f ? _fullTiltSeconds + _frameSeconds : 0.0f;
+             const float acceleration = 1.0f
+-                + (kAccelerationFactor - 1.0f) * std::clamp((_fullTiltSeconds - kAccelerationDelay) / kAccelerationTime, 0.0f, 1.0f);
++                + (kAccelerationFactor - 1.0f)
++                    * std::clamp((_fullTiltSeconds - kAccelerationDelay) / kAccelerationTime, 0.0f, 1.0f);
+             // Slow and precise near the centre, fast at full tilt.
+             float speed = std::pow(tilt, 1.8f) * height / kSecondsPerHeight * acceleration;
+             if (_fullTiltSeconds < kAccelerationDelay && TargetAt(pointer()).has_value())
+diff --git a/src/openrct2-ui/input/Gamepad.h b/src/openrct2-ui/input/Gamepad.h
+index 05c9516..4be8d00 100644
+--- a/src/openrct2-ui/input/Gamepad.h
++++ b/src/openrct2-ui/input/Gamepad.h
+@@ -17,6 +17,11 @@
+ typedef struct _SDL_GameController SDL_GameController;
+ struct SDL_Window;
+ 
++namespace OpenRCT2::Ui::Windows
++{
++    enum class RadialMenu : uint8_t;
++}
++
+ namespace OpenRCT2::Ui
+ {
+     /**
+@@ -26,9 +31,10 @@ namespace OpenRCT2::Ui
+      * stick is held at full tilt. Cross clicks, Square right-clicks, Circle goes back (closes a
+      * dropdown, leaves a tool, closes a window). The d-pad jumps the pointer from button to button,
+      * through lists and dropdowns, and out of the park to the nearest window. L1 and R1 switch tabs
+-     * of the window under the pointer, or rotate the view; L2 and R2 zoom. While building track or
+-     * a bridge, with the pointer in the park, the d-pad picks the piece, Cross builds it and Square
+-     * takes it away. Everything else works as with a mouse, since the pointer is the real one.
++     * of the window under the pointer, or rotate the view; L2 and R2 zoom. Options shows the build
++     * tools in a ring and Triangle the park windows: the stick points at one. While building track
++     * or a bridge, with the pointer in the park, the d-pad picks the piece, Cross builds it and
++     * Square takes it away. Everything else works as with a mouse, since the pointer is the real one.
+      */
+     class Gamepad final
+     {
+@@ -103,6 +109,11 @@ namespace OpenRCT2::Ui
+         bool _dropdownOpen = false;
+         bool _crossOpenedDropdown = false;
+ 
++        // A radial menu opened with this button: letting it go after pointing at an entry runs it.
++        Button _radialButton = Button::options;
++        bool _radialButtonHeld = false;
++        bool _radialPointed = false;
++
+         void readButtons();
+         bool fired(Button button) const;
+         bool held(Button button) const;
+@@ -112,6 +123,8 @@ namespace OpenRCT2::Ui
+         void handleButtons();
+         void handleDirection(int dx, int dy);
+         void back();
++        void openRadialMenu(Windows::RadialMenu menu, Button button);
++        void handleRadialMenu();
+         bool switchTab(int step);
+ 
+         ScreenCoordsXY pointer() const;
+diff --git a/src/openrct2-ui/windows/QuickMenu.cpp b/src/openrct2-ui/windows/QuickMenu.cpp
+deleted file mode 100644
+index 3c5f1fd..0000000
+--- a/src/openrct2-ui/windows/QuickMenu.cpp
++++ /dev/null
+@@ -1,114 +0,0 @@
+-/*****************************************************************************
+- * Copyright (c) 2014-2026 OpenRCT2 developers
+- *
+- * For a complete list of all authors, please refer to contributors.md
+- * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
+- *
+- * OpenRCT2 is licensed under the GNU General Public License version 3.
+- *****************************************************************************/
+-
+-#include "../UiContext.h"
+-#include "../input/ShortcutIds.h"
+-#include "../input/ShortcutManager.h"
+-
+-#include <algorithm>
+-#include <array>
+-#include <openrct2-ui/interface/Widget.h>
+-#include <openrct2-ui/interface/Window.h>
+-#include <openrct2-ui/windows/Windows.h>
+-#include <openrct2/Context.h>
+-#include <openrct2/Input.h>
+-#include <openrct2/SpriteIds.h>
+-#include <openrct2/ui/WindowManager.h>
+-
+-namespace OpenRCT2::Ui::Windows
+-{
+-    // The top toolbar's build tools and park windows next to the pointer, for a controller, whose
+-    // pointer is a long way from the toolbar. Each button runs the toolbar's shortcut.
+-    struct QuickMenuEntry
+-    {
+-        ImageIndex image;
+-        StringId tooltip;
+-        std::string_view shortcut;
+-    };
+-
+-    static constexpr QuickMenuEntry kEntries[] = {
+-        { SPR_TOOLBAR_CONSTRUCT_RIDE, STR_BUILD_RIDE_TIP, ShortcutId::kInterfaceOpenNewRide },
+-        { SPR_TOOLBAR_FOOTPATH, STR_BUILD_FOOTPATH_TIP, ShortcutId::kInterfaceOpenFootpaths },
+-        { SPR_TOOLBAR_SCENERY, STR_PLACE_SCENERY_TIP, ShortcutId::kInterfaceOpenScenery },
+-        { SPR_TOOLBAR_LAND, STR_ADJUST_LAND_TIP, ShortcutId::kInterfaceOpenLand },
+-        { SPR_TOOLBAR_WATER, STR_ADJUST_WATER_TIP, ShortcutId::kInterfaceOpenWater },
+-        { SPR_TOOLBAR_CLEAR_SCENERY, STR_CLEAR_SCENERY_TIP, ShortcutId::kInterfaceClearScenery },
+-        { SPR_TOOLBAR_RIDES, STR_RIDES_IN_PARK_TIP, ShortcutId::kInterfaceOpenRides },
+-        { SPR_TOOLBAR_PARK, STR_PARK_INFORMATION_TIP, ShortcutId::kInterfaceOpenPark },
+-        { SPR_TOOLBAR_GUESTS, STR_GUESTS_TIP, ShortcutId::kInterfaceOpenGuests },
+-        { SPR_TOOLBAR_MAP, STR_SHOW_MAP_TIP, ShortcutId::kInterfaceOpenMap },
+-    };
+-
+-    static constexpr int32_t kColumns = 5;
+-    static constexpr ScreenSize kButtonSize = { 30, 28 };
+-    static constexpr int32_t kBorder = 2;
+-    static constexpr int32_t kRows = (static_cast<int32_t>(std::size(kEntries)) + kColumns - 1) / kColumns;
+-    static constexpr ScreenSize kWindowSize = { kColumns * kButtonSize.width + 2 * kBorder,
+-                                                kRows * kButtonSize.height + 2 * kBorder };
+-
+-    static constexpr auto MakeQuickMenuWidgets()
+-    {
+-        std::array<Widget, std::size(kEntries) + 1> widgets{};
+-        widgets[0] = makeWidget({ 0, 0 }, kWindowSize, WidgetType::frame, WindowColour::primary);
+-        for (size_t i = 0; i < std::size(kEntries); i++)
+-        {
+-            const ScreenCoordsXY position = { kBorder + static_cast<int32_t>(i % kColumns) * kButtonSize.width,
+-                                              kBorder + static_cast<int32_t>(i / kColumns) * kButtonSize.height };
+-            widgets[i + 1] = makeRemapWidget(
+-                position, kButtonSize, WidgetType::trnBtn, WindowColour::tertiary, kEntries[i].image, kEntries[i].tooltip);
+-        }
+-        return widgets;
+-    }
+-
+-    static constexpr auto _quickMenuWidgets = MakeQuickMenuWidgets();
+-
+-    class QuickMenuWindow final : public Window
+-    {
+-    public:
+-        void onOpen() override
+-        {
+-            setWidgets(_quickMenuWidgets);
+-            WindowInitScrollWidgets(*this);
+-        }
+-
+-        void onMouseUp(WidgetIndex widgetIndex) override
+-        {
+-            if (widgetIndex < 1 || widgetIndex > static_cast<WidgetIndex>(std::size(kEntries)))
+-                return;
+-            const auto shortcutId = kEntries[widgetIndex - 1].shortcut;
+-            auto* windowMgr = GetWindowManager();
+-            windowMgr->Close(*this);
+-            if (auto* shortcut = GetShortcutManager().getShortcut(shortcutId))
+-                shortcut->action();
+-        }
+-
+-        void onDraw(Drawing::RenderTarget& rt) override
+-        {
+-            drawWidgets(rt);
+-        }
+-    };
+-
+-    WindowBase* QuickMenuToggle()
+-    {
+-        auto* windowMgr = GetWindowManager();
+-        if (auto* window = windowMgr->FindByClass(WindowClass::quickMenu))
+-        {
+-            windowMgr->Close(*window);
+-            return nullptr;
+-        }
+-
+-        // Centred on the pointer, kept on the screen.
+-        const auto* cursor = ContextGetCursorState();
+-        const ScreenCoordsXY position = {
+-            std::clamp(cursor->position.x - kWindowSize.width / 2, 0, std::max(0, ContextGetWidth() - kWindowSize.width)),
+-            std::clamp(cursor->position.y - kWindowSize.height / 2, 0, std::max(0, ContextGetHeight() - kWindowSize.height)),
+-        };
+-        return windowMgr->Create<QuickMenuWindow>(WindowClass::quickMenu, position, kWindowSize, { WindowFlag::noTitleBar });
+-    }
+-} // namespace OpenRCT2::Ui::Windows
+diff --git a/src/openrct2-ui/windows/RadialMenu.cpp b/src/openrct2-ui/windows/RadialMenu.cpp
+new file mode 100644
+index 0000000..3a10eff
+--- /dev/null
++++ b/src/openrct2-ui/windows/RadialMenu.cpp
+@@ -0,0 +1,233 @@
++/*****************************************************************************
++ * Copyright (c) 2014-2026 OpenRCT2 developers
++ *
++ * For a complete list of all authors, please refer to contributors.md
++ * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
++ *
++ * OpenRCT2 is licensed under the GNU General Public License version 3.
++ *****************************************************************************/
++
++#include "../UiContext.h"
++#include "../input/ShortcutIds.h"
++#include "../input/ShortcutManager.h"
++
++#include <array>
++#include <cmath>
++#include <numbers>
++#include <openrct2-ui/interface/Widget.h>
++#include <openrct2-ui/interface/Window.h>
++#include <openrct2-ui/windows/Windows.h>
++#include <openrct2/Context.h>
++#include <openrct2/GameState.h>
++#include <openrct2/SpriteIds.h>
++#include <openrct2/drawing/Drawing.h>
++#include <openrct2/drawing/Rectangle.h>
++#include <openrct2/drawing/Text.h>
++#include <openrct2/ui/WindowManager.h>
++#include <span>
++
++namespace OpenRCT2::Ui::Windows
++{
++    using namespace OpenRCT2::Drawing;
++
++    // A ring of the top toolbar's buttons in the middle of the screen, for a controller: the stick
++    // points at one, and each runs the toolbar's shortcut.
++    struct RadialEntry
++    {
++        ImageIndex image;
++        StringId name;
++        std::string_view shortcut;
++        // Drawn over the image, as the toolbar does for the buttons without one of their own.
++        ImageIndex overlay = kImageIndexUndefined;
++        ScreenCoordsXY overlayOffset{};
++    };
++
++    static constexpr RadialEntry kBuildEntries[] = {
++        { SPR_TOOLBAR_CONSTRUCT_RIDE, STR_BUILD_RIDE_TIP, ShortcutId::kInterfaceOpenNewRide },
++        { SPR_TOOLBAR_FOOTPATH, STR_BUILD_FOOTPATH_TIP, ShortcutId::kInterfaceOpenFootpaths },
++        { SPR_TOOLBAR_SCENERY, STR_PLACE_SCENERY_TIP, ShortcutId::kInterfaceOpenScenery },
++        { SPR_TOOLBAR_LAND, STR_ADJUST_LAND_TIP, ShortcutId::kInterfaceOpenLand },
++        { SPR_TOOLBAR_WATER, STR_ADJUST_WATER_TIP, ShortcutId::kInterfaceOpenWater },
++        { SPR_TOOLBAR_CLEAR_SCENERY, STR_CLEAR_SCENERY_TIP, ShortcutId::kInterfaceClearScenery },
++    };
++
++    static constexpr RadialEntry kParkEntries[] = {
++        { SPR_TOOLBAR_RIDES, STR_RIDES_IN_PARK_TIP, ShortcutId::kInterfaceOpenRides },
++        { SPR_TOOLBAR_PARK, STR_PARK_INFORMATION_TIP, ShortcutId::kInterfaceOpenPark },
++        { SPR_TOOLBAR_GUESTS, STR_GUESTS_TIP, ShortcutId::kInterfaceOpenGuests },
++        { SPR_TAB_TOOLBAR, STR_STAFF_TIP, ShortcutId::kInterfaceOpenStaff, SPR_TOOLBAR_STAFF },
++        { SPR_TAB_TOOLBAR, STR_SCENARIO_OPTIONS_FINANCIAL_TIP, ShortcutId::kInterfaceOpenFinances, SPR_FINANCE, { 3, 1 } },
++        { SPR_TAB_TOOLBAR,
++          STR_FINANCES_RESEARCH_TIP,
++          ShortcutId::kInterfaceOpenResearch,
++          SPR_TAB_FINANCES_RESEARCH_0,
++          { -1, 0 } },
++        { SPR_TAB_TOOLBAR, STR_SHOW_RECENT_MESSAGES_TIP, ShortcutId::kInterfaceOpenMessages, SPR_G2_TAB_NEWS, { 3, 0 } },
++        { SPR_TOOLBAR_MAP, STR_SHOW_MAP_TIP, ShortcutId::kInterfaceOpenMap },
++    };
++
++    static constexpr size_t kMaxEntries = std::max(std::size(kBuildEntries), std::size(kParkEntries));
++    static constexpr ScreenSize kButtonSize = { 30, 28 };
++    static constexpr int32_t kRadius = 52;
++    static constexpr int32_t kLabelHeight = 14;
++    static constexpr ScreenSize kWindowSize = { 240, 2 * kRadius + kButtonSize.height + 2 * kLabelHeight + 8 };
++    static constexpr ScreenCoordsXY kCentre = { kWindowSize.width / 2, kRadius + kButtonSize.height / 2 + 4 };
++
++    static std::span<const RadialEntry> Entries(RadialMenu menu)
++    {
++        return menu == RadialMenu::build ? std::span<const RadialEntry>(kBuildEntries)
++                                         : std::span<const RadialEntry>(kParkEntries);
++    }
++
++    // The first entry is at the top, the rest follow clockwise.
++    static ScreenCoordsXY EntryCentre(size_t index, size_t count)
++    {
++        const double angle = 2 * std::numbers::pi * index / count;
++        return kCentre
++            + ScreenCoordsXY{ static_cast<int32_t>(std::lround(kRadius * std::sin(angle))),
++                              static_cast<int32_t>(std::lround(-kRadius * std::cos(angle))) };
++    }
++
++    class RadialMenuWindow final : public Window
++    {
++        RadialMenu _menu{};
++        std::span<const RadialEntry> _entries;
++        std::array<Widget, kMaxEntries> _widgets{};
++        int32_t _highlighted = -1;
++
++    public:
++        explicit RadialMenuWindow(RadialMenu menu)
++            : _menu(menu)
++            , _entries(Entries(menu))
++        {
++        }
++
++        RadialMenu menu() const
++        {
++            return _menu;
++        }
++
++        void onOpen() override
++        {
++            for (size_t i = 0; i < _entries.size(); i++)
++            {
++                const auto topLeft = EntryCentre(i, _entries.size())
++                    - ScreenCoordsXY{ kButtonSize.width / 2, kButtonSize.height / 2 };
++                _widgets[i] = makeRemapWidget(
++                    topLeft, kButtonSize, WidgetType::trnBtn, WindowColour::tertiary, _entries[i].image, _entries[i].name);
++            }
++            setWidgets(std::span<const Widget>(_widgets.data(), _entries.size()));
++        }
++
++        // Highlights the entry in the direction (x, y), screen-wise; returns whether that changed.
++        bool point(float x, float y)
++        {
++            const double turn = std::atan2(x, -y) / (2 * std::numbers::pi);
++            const auto count = static_cast<int32_t>(_entries.size());
++            const int32_t index = ((static_cast<int32_t>(std::lround(turn * count)) % count) + count) % count;
++            if (index == _highlighted)
++                return false;
++            _highlighted = index;
++            for (size_t i = 0; i < _entries.size(); i++)
++                setWidgetPressed(static_cast<WidgetIndex>(i), static_cast<int32_t>(i) == _highlighted);
++            invalidate();
++            return true;
++        }
++
++        std::optional<std::string_view> highlighted() const
++        {
++            if (_highlighted < 0)
++                return std::nullopt;
++            return _entries[_highlighted].shortcut;
++        }
++
++        void onDraw(RenderTarget& rt) override
++        {
++            // A dark disc behind the ring, and a band for the name under it.
++            const int32_t radius = kRadius + kButtonSize.height / 2 + 6;
++            const auto centre = windowPos + kCentre;
++            for (int32_t dy = -radius; dy <= radius; dy++)
++            {
++                const auto half = static_cast<int32_t>(std::sqrt(static_cast<double>(radius * radius - dy * dy)));
++                Rectangle::filter(
++                    rt, { centre + ScreenCoordsXY{ -half, dy }, centre + ScreenCoordsXY{ half, dy } },
++                    FilterPaletteID::paletteDarken2);
++            }
++
++            drawWidgets(rt);
++            const auto& park = getGameState().park;
++            for (size_t i = 0; i < _entries.size(); i++)
++            {
++                const auto& entry = _entries[i];
++                if (entry.overlay == kImageIndexUndefined)
++                    continue;
++                auto at = windowPos + ScreenCoordsXY{ widgets[i].left, widgets[i].top } + entry.overlayOffset;
++                if (isWidgetPressed(static_cast<WidgetIndex>(i)))
++                    at.y++;
++                const auto image = entry.overlay == SPR_TOOLBAR_STAFF
++                    ? ImageId(entry.overlay, park.staffHandymanColour, park.staffMechanicColour)
++                    : ImageId(entry.overlay);
++                GfxDrawSprite(rt, image, at);
++            }
++
++            if (_highlighted >= 0)
++            {
++                const ScreenCoordsXY labelTop = { windowPos.x + 2, centre.y + radius + 4 };
++                Rectangle::filter(
++                    rt, { labelTop, labelTop + ScreenCoordsXY{ kWindowSize.width - 5, 2 * kLabelHeight - 4 } },
++                    FilterPaletteID::paletteDarken2);
++                drawTextWrapped(
++                    rt, { centre.x, labelTop.y + 2 }, kWindowSize.width - 8, _entries[_highlighted].name,
++                    { Colour::white, TextAlignment::centre });
++            }
++        }
++    };
++
++    static RadialMenuWindow* FindRadialMenu()
++    {
++        return static_cast<RadialMenuWindow*>(GetWindowManager()->FindByClass(WindowClass::radialMenu));
++    }
++
++    void RadialMenuOpen(RadialMenu menu)
++    {
++        auto* windowMgr = GetWindowManager();
++        windowMgr->CloseByClass(WindowClass::radialMenu);
++        const ScreenCoordsXY position = { (ContextGetWidth() - kWindowSize.width) / 2,
++                                          (ContextGetHeight() - kWindowSize.height) / 2 };
++        windowMgr->Create<RadialMenuWindow>(
++            WindowClass::radialMenu, position, kWindowSize,
++            { WindowFlag::stickToFront, WindowFlag::transparent, WindowFlag::noBackground, WindowFlag::noTitleBar }, menu);
++    }
++
++    std::optional<RadialMenu> RadialMenuShown()
++    {
++        if (auto* w = FindRadialMenu())
++            return w->menu();
++        return std::nullopt;
++    }
++
++    bool RadialMenuPoint(float x, float y)
++    {
++        auto* w = FindRadialMenu();
++        return w != nullptr && w->point(x, y);
++    }
++
++    bool RadialMenuChoose()
++    {
++        auto* w = FindRadialMenu();
++        if (w == nullptr)
++            return false;
++        const auto shortcutId = w->highlighted();
++        if (!shortcutId)
++            return false;
++        GetWindowManager()->Close(*w);
++        if (auto* shortcut = GetShortcutManager().getShortcut(*shortcutId))
++            shortcut->action();
++        return true;
++    }
++
++    void RadialMenuClose()
++    {
++        GetWindowManager()->CloseByClass(WindowClass::radialMenu);
++    }
++} // namespace OpenRCT2::Ui::Windows
+diff --git a/src/openrct2-ui/windows/Windows.h b/src/openrct2-ui/windows/Windows.h
+index 1518ac6..8534702 100644
+--- a/src/openrct2-ui/windows/Windows.h
++++ b/src/openrct2-ui/windows/Windows.h
+@@ -76,7 +76,6 @@ namespace OpenRCT2::Ui::Windows
+ 
+     // ClearScenery
+     WindowBase* ClearSceneryOpen();
+-    WindowBase* QuickMenuToggle();
+     void ToggleClearSceneryWindow();
+ 
+     // CustomCurrency
+@@ -239,6 +238,20 @@ namespace OpenRCT2::Ui::Windows
+     // RefurbishRidePrompt
+     WindowBase* RideRefurbishPromptOpen(const Ride& ride);
+ 
++    // RadialMenu: the build tools or the park windows in a ring, for a controller
++    enum class RadialMenu : uint8_t
++    {
++        build,
++        park,
++    };
++    void RadialMenuOpen(RadialMenu menu);
++    std::optional<RadialMenu> RadialMenuShown();
++    // Highlights the entry in the direction (x, y); returns whether that changed.
++    bool RadialMenuPoint(float x, float y);
++    // Runs the highlighted entry and closes the menu; returns false when none is highlighted.
++    bool RadialMenuChoose();
++    void RadialMenuClose();
++
+     // Research
+     WindowBase* ResearchOpen();
+     void WindowResearchDevelopmentMouseUp(WidgetIndex widgetIndex, WidgetIndex baseWidgetIndex);
+diff --git a/src/openrct2/interface/WindowClasses.h b/src/openrct2/interface/WindowClasses.h
+index c353a7f..1742229 100644
+--- a/src/openrct2/interface/WindowClasses.h
++++ b/src/openrct2/interface/WindowClasses.h
+@@ -96,7 +96,7 @@ namespace OpenRCT2
+         editorParkEntrance = 139,
+         editorStepController = 140,
+         editorStatusLine = 141,
+-        quickMenu = 142,
++        radialMenu = 142,
+ 
+         // Only used for colour schemes
+         staff = 220,

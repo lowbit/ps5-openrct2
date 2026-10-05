@@ -1,0 +1,1859 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Mon, 5 Oct 2026 09:14:46 +0200
+Subject: [PATCH] Play with the controller alone on the PS5
+
+Gamepad replaces GamepadPointer. The left stick moves the pointer with a curve, slower over
+buttons and faster when held at full tilt; pushing it against the edge of the screen scrolls
+the park. The d-pad moves the pointer from button to button across windows, row by row or cell
+by cell through lists (WindowBase::onScrollGetItems, with grids for new rides and scenery and the
+scenarios without their headings), along sliders, and through open dropdowns, which it enters
+once Cross is let go. Circle goes back: closes a dropdown, an error, a text box, a tool and its
+window, or the window under the pointer (or the frontmost one with a close button). L1 and R1
+switch the tabs of the window under the pointer or rotate the view; R3 rotates, L3 pauses, L2
+and R2 zoom towards the pointer. The right stick scrolls the list under the pointer, or the park.
+
+While building track or a bridge path with the pointer over the park, the d-pad turns and
+slopes the piece, Cross builds it (held, it keeps building), Square takes it away, L1 and R1
+bank and Triangle toggles the chain lift; Triangle otherwise rotates the object being placed.
+The controller rumbles lightly as the pointer jumps and when building.
+
+The joystick shortcut bindings on the PS5 are gone: the controller is handled here.
+---
+ src/openrct2-ui/input/Gamepad.cpp          | 976 +++++++++++++++++++++
+ src/openrct2-ui/input/Gamepad.h            | 123 +++
+ src/openrct2-ui/input/GamepadPointer.cpp   | 127 ---
+ src/openrct2-ui/input/GamepadPointer.h     |  45 -
+ src/openrct2-ui/input/InputManager.cpp     |  14 +-
+ src/openrct2-ui/input/InputManager.h       |   4 +-
+ src/openrct2-ui/input/ShortcutManager.h    |   4 +
+ src/openrct2-ui/input/Shortcuts.cpp        |  50 +-
+ src/openrct2-ui/interface/Dropdown.h       |   6 +-
+ src/openrct2-ui/windows/Dropdown.cpp       |  16 +
+ src/openrct2-ui/windows/Footpath.cpp       |  11 +
+ src/openrct2-ui/windows/Guest.cpp          |   9 +
+ src/openrct2-ui/windows/GuestList.cpp      |   6 +
+ src/openrct2-ui/windows/NewRide.cpp        |  11 +
+ src/openrct2-ui/windows/News.cpp           |   6 +
+ src/openrct2-ui/windows/ScenarioSelect.cpp |  23 +
+ src/openrct2-ui/windows/Scenery.cpp        |   9 +
+ src/openrct2-ui/windows/Windows.h          |   2 +
+ src/openrct2/interface/Window.cpp          |  20 +
+ src/openrct2/interface/Window.h            |   7 +
+ src/openrct2/interface/WindowBase.h        |   5 +
+ 21 files changed, 1254 insertions(+), 220 deletions(-)
+ create mode 100644 src/openrct2-ui/input/Gamepad.cpp
+ create mode 100644 src/openrct2-ui/input/Gamepad.h
+ delete mode 100644 src/openrct2-ui/input/GamepadPointer.cpp
+ delete mode 100644 src/openrct2-ui/input/GamepadPointer.h
+
+diff --git a/src/openrct2-ui/input/Gamepad.cpp b/src/openrct2-ui/input/Gamepad.cpp
+new file mode 100644
+index 0000000..ef52e00
+--- /dev/null
++++ b/src/openrct2-ui/input/Gamepad.cpp
+@@ -0,0 +1,976 @@
++/*****************************************************************************
++ * Copyright (c) 2014-2026 OpenRCT2 developers
++ *
++ * For a complete list of all authors, please refer to contributors.md
++ * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
++ *
++ * OpenRCT2 is licensed under the GNU General Public License version 3.
++ *****************************************************************************/
++
++#include "Gamepad.h"
++
++#include "MouseInput.h"
++#include "ShortcutIds.h"
++#include "ShortcutManager.h"
++
++#include <SDL.h>
++#include <algorithm>
++#include <cmath>
++#include <limits>
++#include <tuple>
++#include <utility>
++#include <openrct2-ui/UiContext.h>
++#include <openrct2-ui/interface/Dropdown.h>
++#include <openrct2-ui/interface/Widget.h>
++#include <openrct2-ui/interface/Window.h>
++#include <openrct2-ui/windows/Windows.h>
++#include <openrct2/Context.h>
++#include <openrct2/Input.h>
++#include <openrct2/OpenRCT2.h>
++#include <openrct2/config/Config.h>
++#include <openrct2/interface/Window.h>
++#include <openrct2/ride/RideConstruction.h>
++#include <openrct2/ui/WindowManager.h>
++
++namespace OpenRCT2::Ui
++{
++    using namespace OpenRCT2::Ui::Windows;
++
++    // Below this tilt the stick counts as centred: worn sticks drift.
++    static constexpr float kDeadzone = 0.08f;
++    // At full tilt the pointer crosses the window's height in this time...
++    static constexpr float kSecondsPerHeight = 1.0f;
++    // ...and once the stick has stayed there for kAccelerationDelay, it speeds up to
++    // kAccelerationFactor times that over kAccelerationTime, for crossing the whole screen.
++    static constexpr float kAccelerationDelay = 0.25f;
++    static constexpr float kAccelerationTime = 0.5f;
++    static constexpr float kAccelerationFactor = 2.2f;
++    // Over a button the pointer slows down to this fraction, so it is easy to stop on one.
++    static constexpr float kButtonFriction = 0.5f;
++    // The longest frame the movement accounts for, so a stall does not throw the pointer away.
++    static constexpr float kMaxFrameSeconds = 0.1f;
++    // A held d-pad direction, trigger or build button repeats after this, then at this interval.
++    static constexpr uint32_t kRepeatDelayMs = 380;
++    static constexpr uint32_t kRepeatIntervalMs = 110;
++    static constexpr uint32_t kBuildRepeatIntervalMs = 220;
++    // The pointer glides to where the d-pad sends it in this time.
++    static constexpr uint32_t kGlideMs = 70;
++    // Moving to a widget of another window costs this much more than an equally near one in the same.
++    static constexpr int32_t kOtherWindowPenalty = 20;
++
++    // SDL's buttons for ours; L2 and R2 are read from the joystick (kTriggerButtons).
++    static constexpr std::array<SDL_GameControllerButton, 16> kButtonMap = {
++        SDL_CONTROLLER_BUTTON_A,
++        SDL_CONTROLLER_BUTTON_B,
++        SDL_CONTROLLER_BUTTON_X,
++        SDL_CONTROLLER_BUTTON_Y,
++        SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
++        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
++        SDL_CONTROLLER_BUTTON_INVALID,
++        SDL_CONTROLLER_BUTTON_INVALID,
++        SDL_CONTROLLER_BUTTON_LEFTSTICK,
++        SDL_CONTROLLER_BUTTON_RIGHTSTICK,
++        SDL_CONTROLLER_BUTTON_START,
++        SDL_CONTROLLER_BUTTON_TOUCHPAD,
++        SDL_CONTROLLER_BUTTON_DPAD_UP,
++        SDL_CONTROLLER_BUTTON_DPAD_DOWN,
++        SDL_CONTROLLER_BUTTON_DPAD_LEFT,
++        SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
++    };
++    // The PS5 driver reports L2 and R2 as joystick buttons too, pressed past a light touch.
++    static constexpr int kL2JoystickButton = 15;
++    static constexpr int kR2JoystickButton = 16;
++
++    enum class Building : uint8_t
++    {
++        none,
++        track,
++        path,
++    };
++
++    struct Target
++    {
++        WindowBase* window;
++        WidgetIndex widget; // kWidgetIndexNull for a dropdown item
++        ScreenRect rect;
++    };
++
++#pragma region What the pointer can go to
++
++    static ScreenRect WidgetRect(const WindowBase& w, WidgetIndex index)
++    {
++        const auto& widget = w.widgets[index];
++        return { w.windowPos + ScreenCoordsXY{ widget.left, widget.top },
++                 w.windowPos + ScreenCoordsXY{ widget.right, widget.bottom } };
++    }
++
++    static ScreenCoordsXY Centre(const ScreenRect& rect)
++    {
++        return { (rect.GetLeft() + rect.GetRight()) / 2, (rect.GetTop() + rect.GetBottom()) / 2 };
++    }
++
++    // Windows the d-pad moves through: not the park behind them, tooltips or dropdowns.
++    static bool IsNavigable(const WindowBase& w)
++    {
++        return w.isVisible && w.classification != WindowClass::mainWindow && w.classification != WindowClass::tooltip
++            && w.classification != WindowClass::dropdown;
++    }
++
++    // Windows Circle may close: those with a close button.
++    static bool IsClosable(const WindowBase& w)
++    {
++        return IsNavigable(w)
++            && std::any_of(w.widgets.begin(), w.widgets.end(), [](const Widget& widget) {
++                   return widget.type == WidgetType::closeBox && widget.isVisible();
++               });
++    }
++
++    static bool IsTarget(const WindowBase& w, WidgetIndex index)
++    {
++        const auto& widget = w.widgets[index];
++        if (!widget.isVisible() || widgetIsDisabled(w, index))
++            return false;
++        switch (widget.type)
++        {
++            case WidgetType::colourBtn:
++            case WidgetType::trnBtn:
++            case WidgetType::tab:
++            case WidgetType::flatBtn:
++            case WidgetType::hiddenButton:
++            case WidgetType::button:
++            case WidgetType::tableHeader:
++            case WidgetType::dropdownMenu:
++            case WidgetType::checkbox:
++            case WidgetType::textBox:
++            case WidgetType::scroll:
++                return true;
++            case WidgetType::imgBtn:
++                // Image buttons are also used for pictures; the real ones say what they do.
++                return widget.tooltip != kStringIdNone || widget.sztooltip != nullptr;
++            default:
++                return false;
++        }
++    }
++
++    static bool IsOverPark(const ScreenCoordsXY& position)
++    {
++        auto* w = GetWindowManager()->FindFromPoint(position);
++        return w == nullptr || w->classification == WindowClass::mainWindow || w->classification == WindowClass::viewport;
++    }
++
++    static std::optional<Target> TargetAt(const ScreenCoordsXY& position)
++    {
++        auto* windowMgr = GetWindowManager();
++        auto* w = windowMgr->FindFromPoint(position);
++        if (w == nullptr)
++            return std::nullopt;
++        if (w->classification == WindowClass::dropdown)
++        {
++            const auto index = DropdownIndexFromPoint(position, w);
++            if (auto rect = DropdownItemRect(index))
++                return Target{ w, kWidgetIndexNull, *rect };
++            return std::nullopt;
++        }
++        if (!IsNavigable(*w))
++            return std::nullopt;
++        const auto index = windowMgr->FindWidgetFromPoint(*w, position);
++        if (index == kWidgetIndexNull || !IsTarget(*w, index))
++            return std::nullopt;
++        return Target{ w, index, WidgetRect(*w, index) };
++    }
++
++    // Everything a click could reach: the items of an open dropdown (nothing else then), or the
++    // widgets of every window that no other window or widget covers.
++    static std::vector<Target> CollectTargets()
++    {
++        std::vector<Target> targets;
++        auto* windowMgr = GetWindowManager();
++        if (InputGetState() == InputState::dropdownActive)
++        {
++            auto* dropdown = windowMgr->FindByClass(WindowClass::dropdown);
++            for (int32_t i = 0; dropdown != nullptr && i < gDropdown.numItems; i++)
++            {
++                const auto& item = gDropdown.items[i];
++                if (item.isSeparator() || item.isDisabled())
++                    continue;
++                if (auto rect = DropdownItemRect(i))
++                    targets.push_back({ dropdown, kWidgetIndexNull, *rect });
++            }
++            return targets;
++        }
++
++        WindowVisitEach([&](WindowBase* w) {
++            if (!IsNavigable(*w))
++                return;
++            for (WidgetIndex i = 0; i < w->widgets.size(); i++)
++            {
++                if (!IsTarget(*w, i))
++                    continue;
++                const auto rect = WidgetRect(*w, i);
++                const auto centre = Centre(rect);
++                if (windowMgr->FindFromPoint(centre) == w && windowMgr->FindWidgetFromPoint(*w, centre) == i)
++                    targets.push_back({ w, i, rect });
++            }
++        });
++        return targets;
++    }
++
++    // How far `to` is from `from` going in direction (dx, dy), or nothing when it is not that
++    // way: the gap along the direction, plus the gap and offset across it, which count more, so
++    // the pointer moves along rows and columns rather than jumping diagonally.
++    static std::optional<int32_t> Distance(const ScreenRect& from, const ScreenRect& to, int32_t dx, int32_t dy)
++    {
++        const auto fromCentre = Centre(from);
++        const auto toCentre = Centre(to);
++        int32_t along, gapAcross, offsetAcross;
++        if (dx != 0)
++        {
++            if ((toCentre.x - fromCentre.x) * dx <= 0)
++                return std::nullopt;
++            along = dx > 0 ? to.GetLeft() - from.GetRight() : from.GetLeft() - to.GetRight();
++            gapAcross = std::max({ 0, to.GetTop() - from.GetBottom(), from.GetTop() - to.GetBottom() });
++            offsetAcross = std::abs(toCentre.y - fromCentre.y);
++        }
++        else
++        {
++            if ((toCentre.y - fromCentre.y) * dy <= 0)
++                return std::nullopt;
++            along = dy > 0 ? to.GetTop() - from.GetBottom() : from.GetTop() - to.GetBottom();
++            gapAcross = std::max({ 0, to.GetLeft() - from.GetRight(), from.GetLeft() - to.GetRight() });
++            offsetAcross = std::abs(toCentre.x - fromCentre.x);
++        }
++        return std::max(along, 0) + 3 * gapAcross + offsetAcross / 4;
++    }
++
++    // Whether the two overlap across the direction (dx, dy): side by side, or one above the other.
++    static bool Overlap(const ScreenRect& a, const ScreenRect& b, int32_t dx, int32_t dy)
++    {
++        if (dx != 0)
++            return a.GetTop() <= b.GetBottom() && b.GetTop() <= a.GetBottom();
++        return a.GetLeft() <= b.GetRight() && b.GetLeft() <= a.GetRight();
++    }
++
++#pragma endregion
++
++#pragma region Lists
++
++    struct List
++    {
++        WindowBase& window;
++        WidgetIndex widget;
++        ScrollArea& scroll;
++        std::vector<ScreenRect> items; // in the list's own coordinates
++        ScreenRect view;               // the visible part, on the screen
++
++        ScreenCoordsXY origin() const
++        {
++            const auto& w = window.widgets[widget];
++            return window.windowPos + ScreenCoordsXY{ w.left + 1 - scroll.contentOffsetX, w.top + 1 - scroll.contentOffsetY };
++        }
++
++        ScreenRect onScreen(const ScreenRect& item) const
++        {
++            const auto at = origin();
++            return { item.Point1 + at, ScreenCoordsXY{ std::min(item.GetRight() + at.x, view.GetRight()), item.GetBottom() + at.y } };
++        }
++
++        void update()
++        {
++            widgetScrollUpdateThumbs(window, widget);
++            window.invalidate();
++        }
++
++        // Scrolls so that the item is in view.
++        void reveal(const ScreenRect& item)
++        {
++            const int32_t viewWidth = view.GetWidth() + 1;
++            const int32_t viewHeight = view.GetHeight() + 1;
++            if (item.GetTop() < scroll.contentOffsetY)
++                scroll.contentOffsetY = item.GetTop();
++            else if (item.GetBottom() >= scroll.contentOffsetY + viewHeight)
++                scroll.contentOffsetY = item.GetBottom() + 1 - viewHeight;
++            if (item.GetRight() != kListItemFullWidth)
++            {
++                if (item.GetLeft() < scroll.contentOffsetX)
++                    scroll.contentOffsetX = item.GetLeft();
++                else if (item.GetRight() >= scroll.contentOffsetX + viewWidth)
++                    scroll.contentOffsetX = item.GetRight() + 1 - viewWidth;
++            }
++            scroll.contentOffsetY = std::clamp<int32_t>(scroll.contentOffsetY, 0, std::max(0, scroll.contentHeight - viewHeight));
++            scroll.contentOffsetX = std::clamp<int32_t>(scroll.contentOffsetX, 0, std::max(0, scroll.contentWidth - viewWidth));
++            update();
++        }
++    };
++
++    static List GetList(WindowBase& w, WidgetIndex index)
++    {
++        const int32_t scrollIndex = WindowGetScrollDataIndex(w, index);
++        auto& scroll = w.scrolls[scrollIndex];
++        const auto& widget = w.widgets[index];
++        const int32_t right = widget.right - (scroll.flags.has(ScrollFlag::vScrollbarVisible) ? kScrollBarWidth + 1 : 1);
++        const int32_t bottom = widget.bottom - (scroll.flags.has(ScrollFlag::hScrollbarVisible) ? kScrollBarWidth + 1 : 1);
++        return List{ w, index, scroll, w.onScrollGetItems(scrollIndex),
++                     { w.windowPos + ScreenCoordsXY{ widget.left + 1, widget.top + 1 }, w.windowPos + ScreenCoordsXY{ right, bottom } } };
++    }
++
++    static int32_t DistanceSquared(const ScreenRect& rect, const ScreenCoordsXY& point)
++    {
++        const int32_t x = std::max({ 0, rect.GetLeft() - point.x, point.x - rect.GetRight() });
++        const int32_t y = std::max({ 0, rect.GetTop() - point.y, point.y - rect.GetBottom() });
++        return x * x + y * y;
++    }
++
++    // Where the pointer goes on a list it moves onto: the visible item nearest to it.
++    static ScreenCoordsXY EnterList(List& list, const ScreenCoordsXY& from)
++    {
++        const auto top = list.scroll.contentOffsetY;
++        const auto bottom = top + list.view.GetHeight();
++        const ScreenRect* best = nullptr;
++        int32_t bestDistance = std::numeric_limits<int32_t>::max();
++        for (const auto& item : list.items)
++        {
++            if (item.GetBottom() < top || item.GetTop() > bottom)
++                continue;
++            const auto distance = DistanceSquared(list.onScreen(item), from);
++            if (distance < bestDistance)
++            {
++                best = &item;
++                bestDistance = distance;
++            }
++        }
++        if (best == nullptr)
++            return Centre(list.view);
++        list.reveal(*best);
++        return Centre(list.onScreen(*best));
++    }
++
++    // Moves within a list: from item to item, or along a slider; nothing at the list's edge.
++    static std::optional<ScreenCoordsXY> MoveInList(List& list, const ScreenCoordsXY& position, int32_t dx, int32_t dy)
++    {
++        if (list.items.empty())
++        {
++            // A slider or a wide table: left and right move it.
++            if (dx == 0 || !list.scroll.flags.has(ScrollFlag::hScrollbarVisible))
++                return std::nullopt;
++            const int32_t range = std::max(0, list.scroll.contentWidth - list.view.GetWidth() - 1);
++            list.scroll.contentOffsetX = std::clamp(list.scroll.contentOffsetX + dx * std::max(1, range / 20), 0, range);
++            list.update();
++            return position;
++        }
++
++        const auto contentPosition = position - list.origin();
++        size_t current = 0;
++        int32_t currentDistance = std::numeric_limits<int32_t>::max();
++        for (size_t i = 0; i < list.items.size(); i++)
++        {
++            const auto distance = DistanceSquared(list.items[i], contentPosition);
++            if (distance < currentDistance)
++            {
++                current = i;
++                currentDistance = distance;
++            }
++        }
++
++        std::optional<size_t> next;
++        int32_t nextDistance = std::numeric_limits<int32_t>::max();
++        for (size_t i = 0; i < list.items.size(); i++)
++        {
++            if (i == current)
++                continue;
++            if (auto distance = Distance(list.items[current], list.items[i], dx, dy); distance && *distance < nextDistance)
++            {
++                next = i;
++                nextDistance = *distance;
++            }
++        }
++        if (!next)
++            return std::nullopt;
++
++        const auto& item = list.items[*next];
++        list.reveal(item);
++        auto destination = Centre(list.onScreen(item));
++        // Rows keep the pointer in its column.
++        if (item.GetRight() == kListItemFullWidth)
++            destination.x = std::clamp(position.x, list.view.GetLeft() + 2, list.view.GetRight() - 2);
++        return destination;
++    }
++
++#pragma endregion
++
++    static Building BuildingMode()
++    {
++        if (GetWindowManager()->FindByClass(WindowClass::rideConstruction) != nullptr)
++        {
++            switch (_rideConstructionState)
++            {
++                case RideConstructionState::front:
++                case RideConstructionState::back:
++                case RideConstructionState::selected:
++                    return Building::track;
++                default:
++                    break;
++            }
++        }
++        return WindowFootpathInBridgeMode() ? Building::path : Building::none;
++    }
++
++    static void RunShortcut(std::string_view id)
++    {
++        if (auto* shortcut = GetShortcutManager().getShortcut(id))
++            shortcut->action();
++    }
++
++    void Gamepad::update(const std::vector<SDL_GameController*>& controllers)
++    {
++        _controllers = controllers;
++        const uint32_t ticks = SDL_GetTicks();
++        _frameSeconds = _ticks == 0 ? 0.0f : std::min((ticks - _ticks) / 1000.0f, kMaxFrameSeconds);
++        _ticks = ticks;
++
++        _window = SDL_GetMouseFocus();
++        if (_window == nullptr)
++            return;
++        if (!_placed)
++        {
++            // Start in the middle rather than in a corner.
++            int width, height;
++            SDL_GetWindowSize(_window, &width, &height);
++            SDL_WarpMouseInWindow(_window, width / 2, height / 2);
++            _placed = true;
++        }
++
++        readButtons();
++        movePointer();
++        handleButtons();
++    }
++
++#pragma region Buttons
++
++    void Gamepad::readButtons()
++    {
++        for (uint8_t b = 0; b < Button::count; b++)
++        {
++            bool down = false;
++            for (auto* controller : _controllers)
++            {
++                if (b == Button::l2 || b == Button::r2)
++                {
++                    auto* joystick = SDL_GameControllerGetJoystick(controller);
++                    down |= joystick != nullptr
++                        && SDL_JoystickGetButton(joystick, b == Button::l2 ? kL2JoystickButton : kR2JoystickButton) != 0;
++                }
++                else
++                {
++                    down |= SDL_GameControllerGetButton(controller, kButtonMap[b]) != 0;
++                }
++            }
++
++            auto& state = _buttons[b];
++            const bool repeats = b >= Button::up || b == Button::l2 || b == Button::r2;
++            state.fired = false;
++            if (down && !state.held)
++            {
++                state.fired = true;
++                state.pressedAt = _ticks;
++                state.repeatAt = _ticks + kRepeatDelayMs;
++            }
++            else if (down && repeats && _ticks >= state.repeatAt)
++            {
++                state.fired = true;
++                state.repeatAt = _ticks + kRepeatIntervalMs;
++            }
++            state.held = down;
++        }
++    }
++
++    bool Gamepad::fired(Button button) const
++    {
++        return _buttons[button].fired;
++    }
++
++    bool Gamepad::held(Button button) const
++    {
++        return _buttons[button].held;
++    }
++
++    float Gamepad::axis(int axis) const
++    {
++        float value = 0.0f;
++        for (auto* controller : _controllers)
++        {
++            const float v = SDL_GameControllerGetAxis(controller, static_cast<SDL_GameControllerAxis>(axis)) / 32767.0f;
++            if (std::abs(v) > std::abs(value))
++                value = v;
++        }
++        return std::clamp(value, -1.0f, 1.0f);
++    }
++
++    void Gamepad::handleButtons()
++    {
++        const auto position = pointer();
++        const bool overPark = IsOverPark(position);
++        const auto building = overPark ? BuildingMode() : Building::none;
++
++        // A dropdown opened with Cross gets the pointer once Cross is let go: letting go over an
++        // item would pick it.
++        const bool dropdownOpen = InputGetState() == InputState::dropdownActive;
++        if (dropdownOpen && !_dropdownOpen)
++            _crossOpenedDropdown = held(Button::cross);
++        if (dropdownOpen && _crossOpenedDropdown && !held(Button::cross) && _crossPress == Press::none)
++        {
++            _crossOpenedDropdown = false;
++            int32_t index = -1;
++            for (int32_t i = 0; i < gDropdown.numItems && index == -1; i++)
++                if (gDropdown.items[i].isChecked() && !gDropdown.items[i].isDisabled())
++                    index = i;
++            for (int32_t i = 0; i < gDropdown.numItems && index == -1; i++)
++                if (!gDropdown.items[i].isSeparator() && !gDropdown.items[i].isDisabled())
++                    index = i;
++            if (auto rect = DropdownItemRect(index))
++                sendPointerTo(Centre(*rect));
++        }
++        _dropdownOpen = dropdownOpen;
++
++        // Cross: click, or build the next piece.
++        if (fired(Button::cross))
++        {
++            if (building != Building::none)
++            {
++                _crossPress = Press::construction;
++                RunShortcut(ShortcutId::kWindowRideConstructionBuild);
++                rumble(0x4000, 0x4000, 40);
++            }
++            else
++            {
++                _crossPress = Press::mouse;
++                rumble(0x1800, 0x2400, 18);
++            }
++        }
++        else if (held(Button::cross) && _crossPress == Press::construction && _ticks >= _buttons[Button::cross].repeatAt)
++        {
++            // Holding Cross keeps building.
++            _buttons[Button::cross].repeatAt = _ticks + kBuildRepeatIntervalMs;
++            RunShortcut(ShortcutId::kWindowRideConstructionBuild);
++            rumble(0x4000, 0x4000, 40);
++        }
++        else if (!held(Button::cross))
++        {
++            _crossPress = Press::none;
++        }
++
++        // Square: right-click, or take the last piece away.
++        if (fired(Button::square))
++        {
++            if (building != Building::none)
++            {
++                _squarePress = Press::construction;
++                RunShortcut(ShortcutId::kWindowRideConstructionDemolish);
++                rumble(0x3000, 0x1000, 40);
++            }
++            else
++            {
++                _squarePress = Press::mouse;
++            }
++        }
++        else if (!held(Button::square))
++        {
++            _squarePress = Press::none;
++        }
++
++        setButton(SDL_BUTTON_LEFT, _crossPress == Press::mouse || held(Button::touchpad), _left);
++        setButton(SDL_BUTTON_RIGHT, _squarePress == Press::mouse, _right);
++
++        if (fired(Button::circle))
++            back();
++
++        if (fired(Button::triangle))
++        {
++            if (!RotateConstructionObject() && building == Building::track)
++                RunShortcut(ShortcutId::kWindowRideConstructionChainLift);
++        }
++
++        if (fired(Button::options) && gLegacyScene != LegacyScene::titleSequence)
++            QuickMenuToggle();
++
++        // L1 and R1: the tabs of the window under the pointer, banking while building track,
++        // otherwise the view.
++        for (const auto& [button, step] : { std::pair{ Button::l1, -1 }, std::pair{ Button::r1, 1 } })
++        {
++            if (!fired(button))
++                continue;
++            if (building == Building::track)
++                RunShortcut(step < 0 ? ShortcutId::kWindowRideConstructionBankLeft : ShortcutId::kWindowRideConstructionBankRight);
++            else if (!switchTab(step))
++                RunShortcut(step < 0 ? ShortcutId::kViewGeneralRotateAnticlockwise : ShortcutId::kViewGeneralRotateClockwise);
++        }
++        if (fired(Button::r3))
++            RunShortcut(ShortcutId::kViewGeneralRotateClockwise);
++        if (fired(Button::l3))
++            RunShortcut(ShortcutId::kInterfacePause);
++
++        // L2 and R2 zoom, towards the pointer when it is over the park.
++        if (fired(Button::l2) && gLegacyScene != LegacyScene::titleSequence)
++            MainWindowZoom(false, overPark);
++        if (fired(Button::r2) && gLegacyScene != LegacyScene::titleSequence)
++            MainWindowZoom(true, overPark);
++
++        // The d-pad: the piece to build, or the next button that way.
++        for (const auto& [button, dx, dy] : { std::tuple{ Button::up, 0, -1 }, std::tuple{ Button::down, 0, 1 },
++                                             std::tuple{ Button::left, -1, 0 }, std::tuple{ Button::right, 1, 0 } })
++        {
++            if (!fired(button))
++                continue;
++            if (building != Building::none)
++            {
++                if (dx != 0)
++                    RunShortcut(dx < 0 ? ShortcutId::kWindowRideConstructionTurnLeft : ShortcutId::kWindowRideConstructionTurnRight);
++                else
++                    RunShortcut(dy < 0 ? ShortcutId::kWindowRideConstructionSlopeUp : ShortcutId::kWindowRideConstructionSlopeDown);
++                rumble(0, 0x2000, 15);
++            }
++            else
++            {
++                handleDirection(dx, dy);
++            }
++        }
++    }
++
++    // Circle: closes what is most in the way, one thing per press.
++    void Gamepad::back()
++    {
++        auto* windowMgr = GetWindowManager();
++        if (InputGetState() == InputState::dropdownActive)
++        {
++            windowMgr->CloseByClass(WindowClass::dropdown);
++            gInputFlags.unset(InputFlag::widgetPressed);
++            InputSetState(InputState::reset);
++            return;
++        }
++        if (auto* error = windowMgr->FindByClass(WindowClass::error))
++        {
++            windowMgr->Close(*error);
++            return;
++        }
++        if (GetCurrentTextBox().window.classification != WindowClass::null)
++        {
++            WindowCancelTextbox();
++            return;
++        }
++        if (gInputFlags.has(InputFlag::toolActive))
++        {
++            // The tool windows (scenery, paths, land...) go with their tool.
++            auto* toolWindow = windowMgr->FindByNumber(gCurrentToolWidget.windowClassification, gCurrentToolWidget.windowNumber);
++            switch (gCurrentToolWidget.windowClassification)
++            {
++                case WindowClass::scenery:
++                case WindowClass::footpath:
++                case WindowClass::land:
++                case WindowClass::water:
++                case WindowClass::clearScenery:
++                case WindowClass::landRights:
++                case WindowClass::trackDesignPlace:
++                    if (toolWindow != nullptr)
++                    {
++                        windowMgr->Close(*toolWindow);
++                        return;
++                    }
++                    break;
++                default:
++                    break;
++            }
++            ToolCancel();
++            return;
++        }
++        // The window under the pointer, or else the frontmost one.
++        auto* w = windowMgr->FindFromPoint(pointer());
++        if (w == nullptr || !IsClosable(*w))
++        {
++            w = nullptr;
++            WindowVisitEach([&w](WindowBase* candidate) {
++                if (IsClosable(*candidate))
++                    w = candidate;
++            });
++        }
++        if (w != nullptr)
++            windowMgr->Close(*w);
++    }
++
++    // L1 and R1 over a window with tabs: the previous or next one, round the end.
++    bool Gamepad::switchTab(int step)
++    {
++        auto* w = GetWindowManager()->FindFromPoint(pointer());
++        if (w == nullptr || !IsNavigable(*w))
++            return false;
++        std::vector<WidgetIndex> tabs;
++        for (WidgetIndex i = 0; i < w->widgets.size(); i++)
++            if (w->widgets[i].type == WidgetType::tab && IsTarget(*w, i))
++                tabs.push_back(i);
++        if (tabs.size() < 2)
++            return false;
++        std::sort(tabs.begin(), tabs.end(), [w](WidgetIndex a, WidgetIndex b) {
++            const auto& wa = w->widgets[a];
++            const auto& wb = w->widgets[b];
++            return wa.top != wb.top ? wa.top < wb.top : wa.left < wb.left;
++        });
++        const auto current = std::find_if(tabs.begin(), tabs.end(), [w](WidgetIndex i) { return widgetIsPressed(*w, i); });
++        const int32_t count = static_cast<int32_t>(tabs.size());
++        const int32_t index = current == tabs.end() ? 0 : static_cast<int32_t>(current - tabs.begin());
++        clickAt(Centre(WidgetRect(*w, tabs[((index + step) % count + count) % count])));
++        rumble(0, 0x2000, 15);
++        return true;
++    }
++
++#pragma endregion
++
++#pragma region The d-pad
++
++    void Gamepad::handleDirection(int dx, int dy)
++    {
++        const auto position = _gliding ? _glideTo : pointer();
++        const auto current = TargetAt(position);
++
++        // Within a list or along a slider first.
++        if (current && current->widget != kWidgetIndexNull && current->window->widgets[current->widget].type == WidgetType::scroll)
++        {
++            auto list = GetList(*current->window, current->widget);
++            if (auto destination = MoveInList(list, position, dx, dy))
++            {
++                sendPointerTo(*destination);
++                rumble(0, 0x2400, 15);
++                return;
++            }
++        }
++
++        const ScreenRect from = current ? current->rect : ScreenRect{ position, position };
++        const Target* best = nullptr;
++        int32_t bestDistance = std::numeric_limits<int32_t>::max();
++        const auto targets = CollectTargets();
++        for (const auto& target : targets)
++        {
++            if (current && target.window == current->window && target.widget == current->widget
++                && target.rect.Point1 == current->rect.Point1)
++                continue;
++            auto distance = Distance(from, target.rect, dx, dy);
++            if (!distance)
++                continue;
++            // From a window, only to another window that lies that way, not off to the side.
++            if (current && target.window != current->window)
++            {
++                const auto& w = *current->window;
++                if (!Overlap({ w.windowPos, w.windowPos + ScreenCoordsXY{ w.width - 1, w.height - 1 } }, target.rect, dx, dy))
++                    continue;
++                *distance += kOtherWindowPenalty;
++            }
++            if (*distance < bestDistance)
++            {
++                best = &target;
++                bestDistance = *distance;
++            }
++        }
++        if (best == nullptr)
++            return;
++
++        if (best->widget != kWidgetIndexNull && best->window->widgets[best->widget].type == WidgetType::scroll)
++        {
++            auto list = GetList(*best->window, best->widget);
++            sendPointerTo(EnterList(list, position));
++        }
++        else
++        {
++            sendPointerTo(Centre(best->rect));
++        }
++        rumble(0, 0x2400, 15);
++    }
++
++    bool Gamepad::scrollList(const ScreenCoordsXY& delta)
++    {
++        const auto position = ContextGetCursorState()->position;
++        const auto target = TargetAt(position);
++        if (!target || target->widget == kWidgetIndexNull
++            || target->window->widgets[target->widget].type != WidgetType::scroll)
++            return false;
++
++        auto list = GetList(*target->window, target->widget);
++        const int32_t maxX = std::max(0, list.scroll.contentWidth - list.view.GetWidth() - 1);
++        const int32_t maxY = std::max(0, list.scroll.contentHeight - list.view.GetHeight() - 1);
++        if (list.scroll.flags.has(ScrollFlag::hScrollbarVisible))
++            list.scroll.contentOffsetX = std::clamp(list.scroll.contentOffsetX + delta.x, 0, maxX);
++        if (list.scroll.flags.has(ScrollFlag::vScrollbarVisible))
++            list.scroll.contentOffsetY = std::clamp(list.scroll.contentOffsetY + delta.y, 0, maxY);
++        list.update();
++        return true;
++    }
++
++#pragma endregion
++
++#pragma region The pointer
++
++    ScreenCoordsXY Gamepad::pointer() const
++    {
++        int x, y;
++        SDL_GetMouseState(&x, &y);
++        const float scale = Config::Get().general.windowScale;
++        return { static_cast<int32_t>(x / scale), static_cast<int32_t>(y / scale) };
++    }
++
++    // Glides the pointer to a point of the interface.
++    void Gamepad::sendPointerTo(const ScreenCoordsXY& position)
++    {
++        _glideFrom = pointer();
++        _glideTo = position;
++        _glideStart = _ticks;
++        _gliding = true;
++        _remainderX = 0.0f;
++        _remainderY = 0.0f;
++    }
++
++    void Gamepad::movePointer()
++    {
++        int width, height;
++        SDL_GetWindowSize(_window, &width, &height);
++        const float scale = Config::Get().general.windowScale;
++
++        float moveX = 0.0f;
++        float moveY = 0.0f;
++        const float x = axis(SDL_CONTROLLER_AXIS_LEFTX);
++        const float y = axis(SDL_CONTROLLER_AXIS_LEFTY);
++        const float magnitude = std::hypot(x, y);
++        if (magnitude > kDeadzone)
++        {
++            const float tilt = std::min((magnitude - kDeadzone) / (1.0f - kDeadzone), 1.0f);
++            _fullTiltSeconds = tilt > 0.95f ? _fullTiltSeconds + _frameSeconds : 0.0f;
++            const float acceleration = 1.0f
++                + (kAccelerationFactor - 1.0f) * std::clamp((_fullTiltSeconds - kAccelerationDelay) / kAccelerationTime, 0.0f, 1.0f);
++            // Slow and precise near the centre, fast at full tilt.
++            float speed = std::pow(tilt, 1.8f) * height / kSecondsPerHeight * acceleration;
++            if (_fullTiltSeconds < kAccelerationDelay && TargetAt(pointer()).has_value())
++                speed *= kButtonFriction;
++            moveX = x / magnitude * speed * _frameSeconds;
++            moveY = y / magnitude * speed * _frameSeconds;
++            _gliding = false;
++        }
++        else
++        {
++            _fullTiltSeconds = 0.0f;
++        }
++
++        // The touchpad works like a laptop's: a stroke across all of it crosses the window.
++        bool touching = false;
++        float touchX = 0.0f;
++        float touchY = 0.0f;
++        for (auto* controller : _controllers)
++        {
++            uint8_t state = 0;
++            float fingerX, fingerY, pressure;
++            if (!touching && SDL_GameControllerGetNumTouchpads(controller) > 0
++                && SDL_GameControllerGetTouchpadFinger(controller, 0, 0, &state, &fingerX, &fingerY, &pressure) == 0
++                && state != 0)
++            {
++                touching = true;
++                touchX = fingerX;
++                touchY = fingerY;
++            }
++        }
++        if (touching && _touching)
++        {
++            moveX += (touchX - _touchX) * width;
++            moveY += (touchY - _touchY) * height;
++            _gliding = false;
++        }
++        _touching = touching;
++        _touchX = touchX;
++        _touchY = touchY;
++
++        if (_gliding)
++        {
++            const float t = std::min(static_cast<float>(_ticks - _glideStart) / kGlideMs, 1.0f);
++            const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
++            const float atX = _glideFrom.x + (_glideTo.x - _glideFrom.x) * eased;
++            const float atY = _glideFrom.y + (_glideTo.y - _glideFrom.y) * eased;
++            SDL_WarpMouseInWindow(_window, static_cast<int>((atX + 0.5f) * scale), static_cast<int>((atY + 0.5f) * scale));
++            _gliding = t < 1.0f;
++            return;
++        }
++
++        _remainderX += moveX;
++        _remainderY += moveY;
++        const int stepX = static_cast<int>(_remainderX);
++        const int stepY = static_cast<int>(_remainderY);
++        _remainderX -= stepX;
++        _remainderY -= stepY;
++        if (stepX == 0 && stepY == 0)
++            return;
++
++        int atX, atY;
++        SDL_GetMouseState(&atX, &atY);
++        const int toX = std::clamp(atX + stepX, 0, width - 1);
++        const int toY = std::clamp(atY + stepY, 0, height - 1);
++        SDL_WarpMouseInWindow(_window, toX, toY);
++
++        // Pushing against the edge of the screen over the park scrolls it.
++        const ScreenCoordsXY overflow = { atX + stepX - toX, atY + stepY - toY };
++        if ((overflow.x != 0 || overflow.y != 0) && IsOverPark(pointer()) && gLegacyScene != LegacyScene::titleSequence)
++        {
++            auto* mainWindow = WindowGetMain();
++            if (mainWindow != nullptr)
++            {
++                WindowUnfollowSprite(*mainWindow);
++                InputScrollViewportSmooth(
++                    { static_cast<int32_t>(overflow.x / scale), static_cast<int32_t>(overflow.y / scale) }, mainWindow);
++            }
++        }
++    }
++
++    void Gamepad::setButton(uint8_t button, bool pressed, bool& state)
++    {
++        if (pressed == state)
++            return;
++        state = pressed;
++
++        // A click lands where the pointer was going.
++        if (pressed && _gliding)
++        {
++            const float scale = Config::Get().general.windowScale;
++            SDL_WarpMouseInWindow(
++                _window, static_cast<int>((_glideTo.x + 0.5f) * scale), static_cast<int>((_glideTo.y + 0.5f) * scale));
++            _gliding = false;
++        }
++
++        SDL_Event e{};
++        e.button.type = pressed ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
++        e.button.timestamp = SDL_GetTicks();
++        e.button.windowID = SDL_GetWindowID(_window);
++        e.button.button = button;
++        e.button.state = pressed ? SDL_PRESSED : SDL_RELEASED;
++        e.button.clicks = 1;
++        SDL_GetMouseState(&e.button.x, &e.button.y);
++        SDL_PushEvent(&e);
++    }
++
++    // A left click somewhere other than the pointer.
++    void Gamepad::clickAt(const ScreenCoordsXY& position)
++    {
++        const float scale = Config::Get().general.windowScale;
++        SDL_Event e{};
++        e.button.windowID = SDL_GetWindowID(_window);
++        e.button.button = SDL_BUTTON_LEFT;
++        e.button.clicks = 1;
++        e.button.x = static_cast<int32_t>((position.x + 0.5f) * scale);
++        e.button.y = static_cast<int32_t>((position.y + 0.5f) * scale);
++        for (const bool pressed : { true, false })
++        {
++            e.button.type = pressed ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
++            e.button.state = pressed ? SDL_PRESSED : SDL_RELEASED;
++            e.button.timestamp = SDL_GetTicks();
++            SDL_PushEvent(&e);
++        }
++    }
++
++    void Gamepad::rumble(uint16_t low, uint16_t high, uint32_t milliseconds) const
++    {
++        for (auto* controller : _controllers)
++            SDL_GameControllerRumble(controller, low, high, milliseconds);
++    }
++
++#pragma endregion
++} // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/Gamepad.h b/src/openrct2-ui/input/Gamepad.h
+new file mode 100644
+index 0000000..05c9516
+--- /dev/null
++++ b/src/openrct2-ui/input/Gamepad.h
+@@ -0,0 +1,123 @@
++/*****************************************************************************
++ * Copyright (c) 2014-2026 OpenRCT2 developers
++ *
++ * For a complete list of all authors, please refer to contributors.md
++ * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
++ *
++ * OpenRCT2 is licensed under the GNU General Public License version 3.
++ *****************************************************************************/
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <openrct2/interface/ScreenCoords.hpp>
++#include <vector>
++
++typedef struct _SDL_GameController SDL_GameController;
++struct SDL_Window;
++
++namespace OpenRCT2::Ui
++{
++    /**
++     * Plays the game with a controller alone, for platforms without a mouse (the PS5).
++     *
++     * The left stick and the touchpad move the mouse pointer: slower over buttons, faster when the
++     * stick is held at full tilt. Cross clicks, Square right-clicks, Circle goes back (closes a
++     * dropdown, leaves a tool, closes a window). The d-pad jumps the pointer from button to button,
++     * through lists and dropdowns, and out of the park to the nearest window. L1 and R1 switch tabs
++     * of the window under the pointer, or rotate the view; L2 and R2 zoom. While building track or
++     * a bridge, with the pointer in the park, the d-pad picks the piece, Cross builds it and Square
++     * takes it away. Everything else works as with a mouse, since the pointer is the real one.
++     */
++    class Gamepad final
++    {
++    public:
++        void update(const std::vector<SDL_GameController*>& controllers);
++
++        // The right stick scrolls the list under the pointer rather than the park: returns whether
++        // there was one.
++        static bool scrollList(const ScreenCoordsXY& delta);
++
++    private:
++        enum Button : uint8_t
++        {
++            cross,
++            circle,
++            square,
++            triangle,
++            l1,
++            r1,
++            l2,
++            r2,
++            l3,
++            r3,
++            options,
++            touchpad,
++            up,
++            down,
++            left,
++            right,
++            count,
++        };
++
++        struct ButtonState
++        {
++            bool held = false;
++            bool fired = false; // pressed, or repeating, this frame
++            uint32_t pressedAt = 0;
++            uint32_t repeatAt = 0;
++        };
++
++        enum class Press : uint8_t
++        {
++            none,
++            mouse,
++            construction,
++        };
++
++        std::vector<SDL_GameController*> _controllers;
++        SDL_Window* _window = nullptr;
++        uint32_t _ticks = 0;
++        float _frameSeconds = 0.0f;
++        std::array<ButtonState, Button::count> _buttons{};
++
++        bool _placed = false;
++        float _remainderX = 0.0f;
++        float _remainderY = 0.0f;
++        float _fullTiltSeconds = 0.0f;
++        bool _touching = false;
++        float _touchX = 0.0f;
++        float _touchY = 0.0f;
++
++        // The pointer glides to where the d-pad sent it.
++        bool _gliding = false;
++        uint32_t _glideStart = 0;
++        ScreenCoordsXY _glideFrom;
++        ScreenCoordsXY _glideTo;
++
++        bool _left = false;
++        bool _right = false;
++        Press _crossPress = Press::none;
++        Press _squarePress = Press::none;
++        bool _dropdownOpen = false;
++        bool _crossOpenedDropdown = false;
++
++        void readButtons();
++        bool fired(Button button) const;
++        bool held(Button button) const;
++        float axis(int axis) const;
++
++        void movePointer();
++        void handleButtons();
++        void handleDirection(int dx, int dy);
++        void back();
++        bool switchTab(int step);
++
++        ScreenCoordsXY pointer() const;
++        void sendPointerTo(const ScreenCoordsXY& position);
++        void setButton(uint8_t button, bool pressed, bool& state);
++        void clickAt(const ScreenCoordsXY& position);
++        void rumble(uint16_t low, uint16_t high, uint32_t milliseconds) const;
++    };
++} // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/GamepadPointer.cpp b/src/openrct2-ui/input/GamepadPointer.cpp
+deleted file mode 100644
+index 9ead31e..0000000
+--- a/src/openrct2-ui/input/GamepadPointer.cpp
++++ /dev/null
+@@ -1,127 +0,0 @@
+-/*****************************************************************************
+- * Copyright (c) 2014-2026 OpenRCT2 developers
+- *
+- * For a complete list of all authors, please refer to contributors.md
+- * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
+- *
+- * OpenRCT2 is licensed under the GNU General Public License version 3.
+- *****************************************************************************/
+-
+-#include "GamepadPointer.h"
+-
+-#include <SDL.h>
+-#include <algorithm>
+-#include <cmath>
+-
+-namespace OpenRCT2::Ui
+-{
+-    // Below this tilt the stick counts as centred: worn sticks drift.
+-    static constexpr float kDeadzone = 7000.0f;
+-    // At full tilt the pointer crosses the window's height in this time.
+-    static constexpr float kSecondsPerHeight = 1.2f;
+-    // Holding Circle (B) multiplies the speed by this.
+-    static constexpr float kFastFactor = 2.5f;
+-    // The longest frame the movement accounts for, so a stall does not throw the pointer away.
+-    static constexpr float kMaxFrameSeconds = 0.1f;
+-
+-    void GamepadPointer::update(const std::vector<SDL_GameController*>& controllers)
+-    {
+-        const uint32_t ticks = SDL_GetTicks();
+-        const float seconds = _lastTicks == 0 ? 0.0f : std::min((ticks - _lastTicks) / 1000.0f, kMaxFrameSeconds);
+-        _lastTicks = ticks;
+-
+-        SDL_Window* window = SDL_GetMouseFocus();
+-        if (window == nullptr)
+-            return;
+-        int width, height;
+-        SDL_GetWindowSize(window, &width, &height);
+-        if (!_placed)
+-        {
+-            // Start in the middle rather than in a corner.
+-            SDL_WarpMouseInWindow(window, width / 2, height / 2);
+-            _placed = true;
+-        }
+-
+-        float moveX = 0.0f;
+-        float moveY = 0.0f;
+-        bool left = false;
+-        bool right = false;
+-        bool touching = false;
+-        float touchX = 0.0f;
+-        float touchY = 0.0f;
+-        for (auto* controller : controllers)
+-        {
+-            const float x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
+-            const float y = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
+-            const float magnitude = std::hypot(x, y);
+-            if (magnitude > kDeadzone)
+-            {
+-                // Quadratic response: slow and precise near the centre, fast at full tilt.
+-                const float tilt = std::min((magnitude - kDeadzone) / (32767.0f - kDeadzone), 1.0f);
+-                float speed = tilt * tilt * height / kSecondsPerHeight;
+-                if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B))
+-                    speed *= kFastFactor;
+-                moveX += x / magnitude * speed * seconds;
+-                moveY += y / magnitude * speed * seconds;
+-            }
+-
+-            left |= SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)
+-                || SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_TOUCHPAD);
+-            right |= SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X);
+-
+-            uint8_t state = 0;
+-            float fingerX, fingerY, pressure;
+-            if (!touching && SDL_GameControllerGetNumTouchpads(controller) > 0
+-                && SDL_GameControllerGetTouchpadFinger(controller, 0, 0, &state, &fingerX, &fingerY, &pressure) == 0
+-                && state != 0)
+-            {
+-                touching = true;
+-                touchX = fingerX;
+-                touchY = fingerY;
+-            }
+-        }
+-
+-        // The touchpad works like a laptop's: a stroke across all of it crosses the window.
+-        if (touching && _touching)
+-        {
+-            moveX += (touchX - _touchX) * width;
+-            moveY += (touchY - _touchY) * height;
+-        }
+-        _touching = touching;
+-        _touchX = touchX;
+-        _touchY = touchY;
+-
+-        _remainderX += moveX;
+-        _remainderY += moveY;
+-        const int stepX = static_cast<int>(_remainderX);
+-        const int stepY = static_cast<int>(_remainderY);
+-        _remainderX -= stepX;
+-        _remainderY -= stepY;
+-        if (stepX != 0 || stepY != 0)
+-        {
+-            int x, y;
+-            SDL_GetMouseState(&x, &y);
+-            SDL_WarpMouseInWindow(window, std::clamp(x + stepX, 0, width - 1), std::clamp(y + stepY, 0, height - 1));
+-        }
+-
+-        setButton(window, SDL_BUTTON_LEFT, left, _left);
+-        setButton(window, SDL_BUTTON_RIGHT, right, _right);
+-    }
+-
+-    void GamepadPointer::setButton(SDL_Window* window, uint8_t button, bool pressed, bool& state)
+-    {
+-        if (pressed == state)
+-            return;
+-        state = pressed;
+-
+-        SDL_Event e{};
+-        e.button.type = pressed ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+-        e.button.timestamp = SDL_GetTicks();
+-        e.button.windowID = SDL_GetWindowID(window);
+-        e.button.button = button;
+-        e.button.state = pressed ? SDL_PRESSED : SDL_RELEASED;
+-        e.button.clicks = 1;
+-        SDL_GetMouseState(&e.button.x, &e.button.y);
+-        SDL_PushEvent(&e);
+-    }
+-} // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/GamepadPointer.h b/src/openrct2-ui/input/GamepadPointer.h
+deleted file mode 100644
+index fed4706..0000000
+--- a/src/openrct2-ui/input/GamepadPointer.h
++++ /dev/null
+@@ -1,45 +0,0 @@
+-/*****************************************************************************
+- * Copyright (c) 2014-2026 OpenRCT2 developers
+- *
+- * For a complete list of all authors, please refer to contributors.md
+- * Interested in contributing? Visit https://github.com/OpenRCT2/OpenRCT2
+- *
+- * OpenRCT2 is licensed under the GNU General Public License version 3.
+- *****************************************************************************/
+-
+-#pragma once
+-
+-#include <cstdint>
+-#include <vector>
+-
+-typedef struct _SDL_GameController SDL_GameController;
+-struct SDL_Window;
+-
+-namespace OpenRCT2::Ui
+-{
+-    /**
+-     * Drives the mouse pointer with a game controller, for platforms played without a mouse:
+-     * the left stick and the touchpad move it, Cross (A) and a touchpad click are the left
+-     * button, Square (X) the right button, and holding Circle (B) moves it faster. It moves the
+-     * real pointer and sends ordinary mouse button events, so everything else works as with a
+-     * mouse.
+-     */
+-    class GamepadPointer final
+-    {
+-    public:
+-        void update(const std::vector<SDL_GameController*>& controllers);
+-
+-    private:
+-        uint32_t _lastTicks = 0;
+-        bool _placed = false;
+-        float _remainderX = 0.0f;
+-        float _remainderY = 0.0f;
+-        bool _touching = false;
+-        float _touchX = 0.0f;
+-        float _touchY = 0.0f;
+-        bool _left = false;
+-        bool _right = false;
+-
+-        void setButton(SDL_Window* window, uint8_t button, bool pressed, bool& state);
+-    };
+-} // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/InputManager.cpp b/src/openrct2-ui/input/InputManager.cpp
+index 364660f..dea3db7 100644
+--- a/src/openrct2-ui/input/InputManager.cpp
++++ b/src/openrct2-ui/input/InputManager.cpp
+@@ -137,7 +137,7 @@ void InputManager::checkJoysticks()
+ }
+ 
+ #ifdef __PROSPERO__
+-// The left stick drives the pointer (GamepadPointer), so the right one scrolls.
++// The left stick drives the pointer (Gamepad), so the right one scrolls.
+ static constexpr auto kScrollAxisX = SDL_CONTROLLER_AXIS_RIGHTX;
+ static constexpr auto kScrollAxisY = SDL_CONTROLLER_AXIS_RIGHTY;
+ #else
+@@ -209,7 +209,7 @@ void InputManager::process()
+ {
+     checkJoysticks();
+ #ifdef __PROSPERO__
+-    _gamepadPointer.update(_gameControllers);
++    _gamepad.update(_gameControllers);
+ #endif
+     processAnalogueInput();
+     handleModifiers();
+@@ -230,7 +230,11 @@ void InputManager::handleViewScrolling()
+     auto mainWindow = WindowGetMain();
+ 
+     // Handle gamepad analogue scrolling with cursor-based viewport targeting
+-    if (_analogueScroll.x != 0 || _analogueScroll.y != 0)
++    if ((_analogueScroll.x != 0 || _analogueScroll.y != 0)
++#ifdef __PROSPERO__
++        && !Gamepad::scrollList(_analogueScroll)
++#endif
++    )
+     {
+         // Get cursor position to find target viewport
+         const CursorState* cursorState = ContextGetCursorState();
+@@ -273,7 +277,8 @@ void InputManager::handleViewScrolling()
+         InputScrollViewport(keyboardScroll);
+     }
+ 
+-    // Mouse edge scrolling
++#ifndef __PROSPERO__
++    // Mouse edge scrolling (on the PS5 the pointer rests at the edge; pushing against it scrolls)
+     if (Config::Get().general.edgeScrolling)
+     {
+         if (InputGetState() != InputState::normal)
+@@ -284,6 +289,7 @@ void InputManager::handleViewScrolling()
+ 
+         GameHandleEdgeScroll();
+     }
++#endif
+ }
+ 
+ void InputManager::handleModifiers()
+diff --git a/src/openrct2-ui/input/InputManager.h b/src/openrct2-ui/input/InputManager.h
+index f4e3fb9..87548e5 100644
+--- a/src/openrct2-ui/input/InputManager.h
++++ b/src/openrct2-ui/input/InputManager.h
+@@ -9,7 +9,7 @@
+ 
+ #pragma once
+ 
+-#include "GamepadPointer.h"
++#include "Gamepad.h"
+ 
+ #include <openrct2/interface/ScreenCoords.hpp>
+ #include <queue>
+@@ -61,7 +61,7 @@ namespace OpenRCT2::Ui
+     private:
+         uint32_t _lastJoystickCheck{};
+         std::vector<SDL_GameController*> _gameControllers;
+-        GamepadPointer _gamepadPointer;
++        Gamepad _gamepad;
+         std::queue<InputEvent> _events;
+         ScreenCoordsXY _viewScroll;
+         ScreenCoordsXY _analogueScroll;     // analogue stick scroll values
+diff --git a/src/openrct2-ui/input/ShortcutManager.h b/src/openrct2-ui/input/ShortcutManager.h
+index 87d6f0e..e2b5098 100644
+--- a/src/openrct2-ui/input/ShortcutManager.h
++++ b/src/openrct2-ui/input/ShortcutManager.h
+@@ -148,4 +148,8 @@ namespace OpenRCT2::Ui
+ 
+         static std::string_view getLegacyShortcutId(size_t index);
+     };
++
++    // Rotates the object being placed or built (the rotate construction object shortcut); returns
++    // whether there was one.
++    bool RotateConstructionObject();
+ } // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/Shortcuts.cpp b/src/openrct2-ui/input/Shortcuts.cpp
+index 0d9345f..b7eb9eb 100644
+--- a/src/openrct2-ui/input/Shortcuts.cpp
++++ b/src/openrct2-ui/input/Shortcuts.cpp
+@@ -79,10 +79,10 @@ static void ToggleViewFlag(int32_t viewportFlag)
+     }
+ }
+ 
+-static void ShortcutRotateConstructionObject()
++bool OpenRCT2::Ui::RotateConstructionObject()
+ {
+     if (gLegacyScene == LegacyScene::titleSequence)
+-        return;
++        return false;
+ 
+     auto* windowMgr = GetWindowManager();
+ 
+@@ -92,7 +92,7 @@ static void ShortcutRotateConstructionObject()
+         && w->widgets[WC_SCENERY__WIDX_SCENERY_ROTATE_OBJECTS_BUTTON].isVisible())
+     {
+         w->onMouseUp(WC_SCENERY__WIDX_SCENERY_ROTATE_OBJECTS_BUTTON);
+-        return;
++        return true;
+     }
+ 
+     // Rotate construction track piece
+@@ -104,7 +104,7 @@ static void ShortcutRotateConstructionObject()
+         if (w->widgets[WC_RIDE_CONSTRUCTION__WIDX_ROTATE].tooltip != STR_RIDE_CONSTRUCTION_BUILD_MAZE_IN_THIS_DIRECTION_TIP)
+         {
+             w->onMouseUp(WC_RIDE_CONSTRUCTION__WIDX_ROTATE);
+-            return;
++            return true;
+         }
+     }
+ 
+@@ -114,7 +114,7 @@ static void ShortcutRotateConstructionObject()
+         && w->widgets[WC_TRACK_DESIGN_LIST__WIDX_ROTATE].isVisible())
+     {
+         w->onMouseUp(WC_TRACK_DESIGN_LIST__WIDX_ROTATE);
+-        return;
++        return true;
+     }
+ 
+     // Rotate track design placement
+@@ -123,7 +123,7 @@ static void ShortcutRotateConstructionObject()
+         && w->widgets[WC_TRACK_DESIGN_PLACE__WIDX_ROTATE].isVisible())
+     {
+         w->onMouseUp(WC_TRACK_DESIGN_PLACE__WIDX_ROTATE);
+-        return;
++        return true;
+     }
+ 
+     // Rotate park entrance
+@@ -132,7 +132,7 @@ static void ShortcutRotateConstructionObject()
+         && w->widgets[WC_EDITOR_PARK_ENTRANCE__WIDX_ROTATE_ENTRANCE_BUTTON].isVisible())
+     {
+         w->onMouseUp(WC_EDITOR_PARK_ENTRANCE__WIDX_ROTATE_ENTRANCE_BUTTON);
+-        return;
++        return true;
+     }
+ 
+     // Rotate selected element in tile inspector
+@@ -141,8 +141,9 @@ static void ShortcutRotateConstructionObject()
+         && w->widgets[WC_TILE_INSPECTOR__WIDX_BUTTON_ROTATE].isVisible())
+     {
+         w->onMouseUp(WC_TILE_INSPECTOR__WIDX_BUTTON_ROTATE);
+-        return;
++        return true;
+     }
++    return false;
+ }
+ 
+ static void ShortcutRemoveTopBottomToolbarToggle()
+@@ -765,7 +766,7 @@ void ShortcutManager::registerDefaultShortcuts()
+             windowMgr->CloseTop();
+         }
+     });
+-    registerShortcut(ShortcutId::kInterfaceRotateConstruction, STR_SHORTCUT_ROTATE_CONSTRUCTION_OBJECT, "Z", ShortcutRotateConstructionObject);
++    registerShortcut(ShortcutId::kInterfaceRotateConstruction, STR_SHORTCUT_ROTATE_CONSTRUCTION_OBJECT, "Z", []() { RotateConstructionObject(); });
+     registerShortcut(ShortcutId::kInterfaceCancelConstruction, STR_SHORTCUT_CANCEL_CONSTRUCTION_MODE, "ESCAPE", []() {
+         if (gLegacyScene != LegacyScene::titleSequence)
+         {
+@@ -919,35 +920,4 @@ void ShortcutManager::registerDefaultShortcuts()
+         }
+     });
+     // clang-format on
+-
+-#ifdef __PROSPERO__
+-    registerShortcut(RegisteredShortcut("interface.open.quick_menu", "Quick menu (build tools)", []() {
+-        if (gLegacyScene != LegacyScene::titleSequence)
+-            QuickMenuToggle();
+-    }));
+-
+-    // The PS5 is played with a DualSense. The left stick, Cross, Square, Circle and the touchpad
+-    // drive the pointer (GamepadPointer) and the right stick scrolls; these are the other buttons.
+-    // JOY numbers count from 1 in SDL's PS5 button order.
+-    static constexpr std::pair<std::string_view, std::string_view> kControllerDefaults[] = {
+-        { "interface.open.quick_menu", "JOY 7" },                      // Options
+-        { ShortcutId::kInterfaceCloseAll, "JOY 4" },                   // Triangle
+-        { ShortcutId::kViewGeneralRotateAnticlockwise, "JOY 10" },     // L1
+-        { ShortcutId::kViewGeneralRotateClockwise, "JOY 11" },         // R1
+-        { ShortcutId::kViewGeneralZoomOut, "JOY 16" },                 // L2
+-        { ShortcutId::kViewGeneralZoomIn, "JOY 17" },                  // R2
+-        { ShortcutId::kViewScrollUp, "JOY UP" },
+-        { ShortcutId::kViewScrollDown, "JOY DOWN" },
+-        { ShortcutId::kViewScrollLeft, "JOY LEFT" },
+-        { ShortcutId::kViewScrollRight, "JOY RIGHT" },
+-    };
+-    for (const auto& [id, chord] : kControllerDefaults)
+-    {
+-        if (auto* shortcut = getShortcut(id))
+-        {
+-            shortcut->standard.emplace_back(chord);
+-            shortcut->current = shortcut->standard;
+-        }
+-    }
+-#endif
+ }
+diff --git a/src/openrct2-ui/interface/Dropdown.h b/src/openrct2-ui/interface/Dropdown.h
+index f5de9fc..74534eb 100644
+--- a/src/openrct2-ui/interface/Dropdown.h
++++ b/src/openrct2-ui/interface/Dropdown.h
+@@ -18,12 +18,11 @@
+ #include <openrct2/core/StringTypes.h>
+ #include <openrct2/drawing/Colour.h>
+ #include <openrct2/drawing/ImageId.hpp>
++#include <openrct2/interface/ScreenCoords.hpp>
+ #include <openrct2/interface/Window.h>
+ #include <optional>
+ #include <span>
+ 
+-struct ScreenCoordsXY;
+-
+ namespace OpenRCT2
+ {
+     struct ColourWithFlags;
+@@ -80,6 +79,9 @@ namespace OpenRCT2::Ui::Windows
+ 
+     int32_t DropdownIndexFromPoint(const ScreenCoordsXY& loc, WindowBase* w);
+ 
++    // Where an item of the open dropdown is on the screen.
++    std::optional<ScreenRect> DropdownItemRect(int32_t index);
++
+     void WindowDropdownShowColour(
+         WindowBase* w, Widget* widget, ColourWithFlags dropdownColour, Drawing::Colour selectedColour,
+         bool alwaysHideSpecialColours = false);
+diff --git a/src/openrct2-ui/windows/Dropdown.cpp b/src/openrct2-ui/windows/Dropdown.cpp
+index 66d4db5..f0e2eb6 100644
+--- a/src/openrct2-ui/windows/Dropdown.cpp
++++ b/src/openrct2-ui/windows/Dropdown.cpp
+@@ -331,6 +331,14 @@ namespace OpenRCT2::Ui::Windows
+             return dropdownIndex;
+         }
+ 
++        ScreenRect GetItemRect(int32_t index) const
++        {
++            const int32_t columnNum = ListVertically ? index / NumRows : index % NumColumns;
++            const int32_t rowNum = ListVertically ? index % NumRows : index / NumColumns;
++            const auto topLeft = windowPos + ScreenCoordsXY{ 2 + columnNum * ItemWidth, 2 + rowNum * ItemHeight };
++            return { topLeft, topLeft + ScreenCoordsXY{ ItemWidth - 1, ItemHeight - 1 } };
++        }
++
+     private:
+         void UpdateSizeAndPosition(const ScreenCoordsXY& screenPos, const int32_t extraY)
+         {
+@@ -513,6 +521,14 @@ namespace OpenRCT2::Ui::Windows
+         return -1;
+     }
+ 
++    std::optional<ScreenRect> DropdownItemRect(int32_t index)
++    {
++        auto* w = GetWindowManager()->FindByClass(WindowClass::dropdown);
++        if (w == nullptr || index < 0 || index >= gDropdown.numItems)
++            return std::nullopt;
++        return static_cast<DropdownWindow*>(w)->GetItemRect(index);
++    }
++
+     // Colour ordered for use in colour dropdown
+     static constexpr Colour kColoursDropdownOrder[] = {
+         Colour::black,          Colour::saturatedRed,   Colour::darkOrange,   Colour::darkYellow,
+diff --git a/src/openrct2-ui/windows/Footpath.cpp b/src/openrct2-ui/windows/Footpath.cpp
+index 4cf9c58..260518b 100644
+--- a/src/openrct2-ui/windows/Footpath.cpp
++++ b/src/openrct2-ui/windows/Footpath.cpp
+@@ -1829,6 +1829,11 @@ namespace OpenRCT2::Ui::Windows
+ 
+ #pragma region Keyboard Shortcuts Events
+     public:
++        bool InBridgeMode() const
++        {
++            return _footpathConstructionMode == PathConstructionMode::bridgeOrTunnel;
++        }
++
+         void KeyboardShortcutTurnLeft()
+         {
+             if (isWidgetDisabled(WIDX_DIRECTION_NW) || isWidgetDisabled(WIDX_DIRECTION_NE)
+@@ -2039,6 +2044,12 @@ namespace OpenRCT2::Ui::Windows
+         }
+     }
+ 
++    bool WindowFootpathInBridgeMode()
++    {
++        auto* w = GetWindowManager()->FindByClass(WindowClass::footpath);
++        return w != nullptr && static_cast<FootpathWindow*>(w)->InBridgeMode();
++    }
++
+     /**
+      *
+      *  rct2: 0x0066CCE7
+diff --git a/src/openrct2-ui/windows/Guest.cpp b/src/openrct2-ui/windows/Guest.cpp
+index 94cb85e..bd153e6 100644
+--- a/src/openrct2-ui/windows/Guest.cpp
++++ b/src/openrct2-ui/windows/Guest.cpp
+@@ -408,6 +408,15 @@ namespace OpenRCT2::Ui::Windows
+             return {};
+         }
+ 
++        std::vector<ScreenRect> onScrollGetItems(int32_t scrollIndex) override
++        {
++            if (page == WINDOW_GUEST_RIDES)
++            {
++                return WindowListItems(static_cast<int32_t>(_riddenRides.size()), 10);
++            }
++            return {};
++        }
++
+         void onScrollMouseOver(int32_t scrollIndex, const ScreenCoordsXY& screenCoords) override
+         {
+             if (page == WINDOW_GUEST_RIDES)
+diff --git a/src/openrct2-ui/windows/GuestList.cpp b/src/openrct2-ui/windows/GuestList.cpp
+index 08145b4..e1cf7bb 100644
+--- a/src/openrct2-ui/windows/GuestList.cpp
++++ b/src/openrct2-ui/windows/GuestList.cpp
+@@ -468,6 +468,12 @@ namespace OpenRCT2::Ui::Windows
+             }
+         }
+ 
++        std::vector<ScreenRect> onScrollGetItems(int32_t scrollIndex) override
++        {
++            const int32_t rowHeight = _selectedTab == TabId::individual ? kScrollableRowHeight : kSummarisedGuestsRowHeight;
++            return WindowListItems(onScrollGetSize(scrollIndex).height / rowHeight, rowHeight);
++        }
++
+         ScreenSize onScrollGetSize(int32_t scrollIndex) override
+         {
+             int32_t y = 0;
+diff --git a/src/openrct2-ui/windows/NewRide.cpp b/src/openrct2-ui/windows/NewRide.cpp
+index 9dc6f9e..b0ae93f 100644
+--- a/src/openrct2-ui/windows/NewRide.cpp
++++ b/src/openrct2-ui/windows/NewRide.cpp
+@@ -456,6 +456,17 @@ namespace OpenRCT2::Ui::Windows
+             return { widgets[WIDX_RIDE_LIST].width() - 1, ((count + (itemsPerRow - 1)) / itemsPerRow) * kScrollItemSize };
+         }
+ 
++        std::vector<ScreenRect> onScrollGetItems(int32_t scrollIndex) override
++        {
++            int32_t count = 0;
++            for (auto* listItem = _windowNewRideListItems;
++                 listItem->Type != kRideTypeNull || listItem->EntryIndex != kObjectEntryIndexNull; listItem++)
++            {
++                count++;
++            }
++            return WindowGridItems(count, getNumImagesPerRow(), { kScrollItemSize, kScrollItemSize });
++        }
++
+         void onScrollMouseOver(int32_t scrollIndex, const ScreenCoordsXY& screenCoords) override
+         {
+             RideSelection item = ScrollGetRideListItemAt(screenCoords);
+diff --git a/src/openrct2-ui/windows/News.cpp b/src/openrct2-ui/windows/News.cpp
+index 4ca3691..e5a2124 100644
+--- a/src/openrct2-ui/windows/News.cpp
++++ b/src/openrct2-ui/windows/News.cpp
+@@ -418,6 +418,12 @@ namespace OpenRCT2::Ui::Windows
+             return { kWindowSize.width, scrollHeight };
+         }
+ 
++        std::vector<ScreenRect> onScrollGetItems(int32_t scrollIndex) override
++        {
++            return WindowListItems(
++                static_cast<int32_t>(getGameState().newsItems.getArchived().size()), CalculateNewsItemHeight());
++        }
++
+         void onScrollMouseDown(int32_t scrollIndex, const ScreenCoordsXY& screenCoords) override
+         {
+             int32_t itemHeight = CalculateNewsItemHeight();
+diff --git a/src/openrct2-ui/windows/ScenarioSelect.cpp b/src/openrct2-ui/windows/ScenarioSelect.cpp
+index 4020d12..c8f8f2f 100644
+--- a/src/openrct2-ui/windows/ScenarioSelect.cpp
++++ b/src/openrct2-ui/windows/ScenarioSelect.cpp
+@@ -461,6 +461,29 @@ namespace OpenRCT2::Ui::Windows
+             return { kWindowSize.width, y };
+         }
+ 
++        // The scenarios, without the headings between them.
++        std::vector<ScreenRect> onScrollGetItems(int32_t scrollIndex) override
++        {
++            const int32_t scenarioItemHeight = GetScenarioListItemSize();
++
++            std::vector<ScreenRect> items;
++            int32_t y = 0;
++            for (const auto& listItem : _listItems)
++            {
++                switch (listItem.type)
++                {
++                    case ListItemType::heading:
++                        y += 18;
++                        break;
++                    case ListItemType::scenario:
++                        items.push_back({ { 0, y }, { kListItemFullWidth, y + scenarioItemHeight - 1 } });
++                        y += scenarioItemHeight;
++                        break;
++                }
++            }
++            return items;
++        }
++
+         void onScrollMouseOver(int32_t scrollIndex, const ScreenCoordsXY& screenCoords) override
+         {
+             const int32_t scenarioItemHeight = GetScenarioListItemSize();
+diff --git a/src/openrct2-ui/windows/Scenery.cpp b/src/openrct2-ui/windows/Scenery.cpp
+index eeaf4a3..7f3d808 100644
+--- a/src/openrct2-ui/windows/Scenery.cpp
++++ b/src/openrct2-ui/windows/Scenery.cpp
+@@ -1505,6 +1505,15 @@ namespace OpenRCT2::Ui::Windows
+             return { 0, ContentRowsHeight(rows) };
+         }
+ 
++        std::vector<ScreenRect> onScrollGetItems(int32_t scrollIndex) override
++        {
++            if (_activeTabIndex >= _tabEntries.size())
++                return {};
++            return WindowGridItems(
++                static_cast<int32_t>(_filteredSceneryTab.Entries.size()), GetNumColumns(),
++                { kSceneryButtonWidth, kSceneryButtonHeight });
++        }
++
+         void onScrollMouseDown(int32_t scrollIndex, const ScreenCoordsXY& screenCoords) override
+         {
+             const auto scenery = GetSceneryIdByCursorPos(screenCoords);
+diff --git a/src/openrct2-ui/windows/Windows.h b/src/openrct2-ui/windows/Windows.h
+index b38e28c..1518ac6 100644
+--- a/src/openrct2-ui/windows/Windows.h
++++ b/src/openrct2-ui/windows/Windows.h
+@@ -130,6 +130,8 @@ namespace OpenRCT2::Ui::Windows
+     void WindowFootpathKeyboardShortcutSlopeUp();
+     void WindowFootpathKeyboardShortcutBuildCurrent();
+     void WindowFootpathKeyboardShortcutDemolishCurrent();
++    // Whether paths are being built piece by piece (bridge or tunnel), rather than laid on the land.
++    bool WindowFootpathInBridgeMode();
+     bool WindowFootpathSelectDefault();
+ 
+     // GameBottomToolbar
+diff --git a/src/openrct2/interface/Window.cpp b/src/openrct2/interface/Window.cpp
+index b7caea7..1201692 100644
+--- a/src/openrct2/interface/Window.cpp
++++ b/src/openrct2/interface/Window.cpp
+@@ -239,6 +239,26 @@ static constexpr float kWindowScrollLocations[][2] = {
+         return result;
+     }
+ 
++    std::vector<ScreenRect> WindowListItems(int32_t count, int32_t rowHeight)
++    {
++        std::vector<ScreenRect> items;
++        for (int32_t i = 0; i < count; i++)
++            items.push_back({ { 0, i * rowHeight }, { kListItemFullWidth, (i + 1) * rowHeight - 1 } });
++        return items;
++    }
++
++    std::vector<ScreenRect> WindowGridItems(int32_t count, int32_t columns, ScreenSize cell)
++    {
++        std::vector<ScreenRect> items;
++        columns = std::max(columns, 1);
++        for (int32_t i = 0; i < count; i++)
++        {
++            const ScreenCoordsXY topLeft = { (i % columns) * cell.width, (i / columns) * cell.height };
++            items.push_back({ topLeft, topLeft + ScreenCoordsXY{ cell.width - 1, cell.height - 1 } });
++        }
++        return items;
++    }
++
+     /**
+      *
+      *  rct2: 0x006EE65A
+diff --git a/src/openrct2/interface/Window.h b/src/openrct2/interface/Window.h
+index 4aeaea3..09f38c2 100644
+--- a/src/openrct2/interface/Window.h
++++ b/src/openrct2/interface/Window.h
+@@ -10,9 +10,11 @@
+ #pragma once
+ 
+ #include "../Identifiers.h"
++#include "ScreenCoords.hpp"
+ 
+ #include <functional>
+ #include <memory>
++#include <vector>
+ 
+ struct CoordsXYZ;
+ struct ZoomLevel;
+@@ -62,6 +64,11 @@ namespace OpenRCT2
+ 
+     int32_t WindowGetScrollDataIndex(const WindowBase& w, WidgetIndex widget_index);
+ 
++    // For WindowBase::onScrollGetItems: rows as wide as the list (kListItemFullWidth), or a grid.
++    constexpr int32_t kListItemFullWidth = 0x7FFF;
++    std::vector<ScreenRect> WindowListItems(int32_t count, int32_t rowHeight);
++    std::vector<ScreenRect> WindowGridItems(int32_t count, int32_t columns, ScreenSize cell);
++
+     void WindowPushOthersRight(WindowBase& w);
+     void WindowPushOthersBelow(WindowBase& w1);
+ 
+diff --git a/src/openrct2/interface/WindowBase.h b/src/openrct2/interface/WindowBase.h
+index 4a6411b..2f15f1d 100644
+--- a/src/openrct2/interface/WindowBase.h
++++ b/src/openrct2/interface/WindowBase.h
+@@ -185,6 +185,11 @@ namespace OpenRCT2
+         {
+             return {};
+         }
++        // The rows or cells of a list in its own coordinates, for stepping through it with a controller.
++        virtual std::vector<ScreenRect> onScrollGetItems(int32_t scrollIndex)
++        {
++            return WindowListItems(onScrollGetSize(scrollIndex).height / kScrollableRowHeight, kScrollableRowHeight);
++        }
+         virtual void onScrollSelect(int32_t scrollIndex, int32_t scrollAreaType)
+         {
+         }

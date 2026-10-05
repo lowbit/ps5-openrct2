@@ -6,10 +6,12 @@ native-app boilerplate's tools. The player brings the RCT2 data; none is in this
 
 Status (2026-10-05): runs on the console (FW 13.00) at 1080p: title screen, starting a scenario,
 playing at 56 to 58 frames per second, saving, and importing the game files into an empty title
-from a PC (2457 files, 671 MB, in about 2.5 minutes), after which the game starts by itself. The
-DualSense drives a pointer and the shortcuts below; Options opens a quick menu of build tools. Not
-yet confirmed on hardware: a USB or Bluetooth mouse and keyboard, typing in the IME dialog (it
-opens), the sound, a ZIP import, and an import from a phone's browser.
+from a PC (2457 files, 671 MB, in about 2.5 minutes), after which the game starts by itself. It is
+played with the DualSense alone (Controls, below); console tests drove the menus, lists, tabs,
+radial menus, track and path building and scenery placement with it. Not yet confirmed on
+hardware: how the controls feel in a person's hands, typing in the IME dialog (it opens), the
+sound, a ZIP import, and an import from a phone's browser. Mouse and keyboard support is in the
+SDL patches but untested, and Rijad does not plan to use either.
 
 ## Layout
 
@@ -153,13 +155,24 @@ offers, instead of guessing from compile-only checks.
    OpenRCT2 took RGB565, which `CopyBitsToTexture` cannot fill: the screen stayed black.
 3. `/app0/eboot.bin` is the executable path (the sandbox refuses the sysctl).
 4. The 16-bit `wchar_t` branch of `toWideChar` compiles and reads the right length.
-5. `GamepadPointer`: the left stick and the touchpad move the real pointer, Cross and Square send
-   left and right button events; the right stick scrolls on the PS5.
-6. Default controller shortcuts on the PS5 (table below), ordinary bindings that can be changed.
+5. and 6. A first pointer for the controller and joystick shortcut bindings; 10 replaces both.
 7. Text input hands the IME the text being edited.
 8. A PS5 platform UI context: no zenity or kdialog (the Linux context ran them through `popen`,
    which crashed saving a new game), OpenRCT2's own file browser, messages as notifications.
-9. The quick menu: the toolbar's build tools and park windows around the pointer, on Options.
+9. A quick menu at the pointer; 11 replaces it.
+10. `input/Gamepad.cpp`: the controller layer (Controls, below), replacing `GamepadPointer` and the
+    joystick bindings. It moves the real pointer and sends ordinary mouse button events, so every
+    window works as with a mouse, and adds what a controller needs on top. It needs a few hooks:
+    `WindowBase::onScrollGetItems` (the rows or cells of a list, overridden where they are not
+    rows of `kScrollableRowHeight`: new rides, scenery, scenarios without their headings, news,
+    guests), `DropdownItemRect`, `WindowFootpathInBridgeMode`, and `RotateConstructionObject` (the
+    rotate shortcut, which says whether there was anything to rotate). The mouse's edge scrolling
+    is off on the PS5: the pointer rests at the edge, and pushing the stick against it scrolls.
+11. `windows/RadialMenu.cpp`: the build tools and the park windows in rings.
+12. Button hints, drawn over the middle of the bottom toolbar by `Gamepad::drawHints` (from
+    `UiContext::Draw`, marking their area dirty each frame as the FPS counter does), and
+    `WindowSceneryRaise`/`WindowSceneryCanRaise`: the controller's stepped version of holding Shift
+    while placing scenery.
 
 ## The port (`src/port`)
 
@@ -174,19 +187,35 @@ offers, instead of guessing from compile-only checks.
 
 ## Controls
 
-| Input | Action |
-| --- | --- |
-| Left stick | Move the pointer (holding Circle makes it faster) |
-| Touchpad | Move the pointer like a laptop's; a click is a left click |
-| Cross / Square | Left / right mouse button |
-| Right stick, d-pad | Scroll the view |
-| L1 / R1 | Rotate the view |
-| L2 / R2 | Zoom out / in |
-| Triangle | Close all windows |
-| Options | Quick menu: rides, paths, scenery, land, water, clear scenery, rides list, park, guests, map |
-| USB or Bluetooth mouse and keyboard | Work as on a PC |
+The game is played with the DualSense alone. The rule is that buttons act on what is under the
+pointer, and the middle of the bottom toolbar lists what they do right now (unless it shows news).
 
-Text boxes open the PS5 on-screen keyboard with the current text.
+| Input | In the park | Over a window | Building track or a bridge path, pointer in the park |
+| --- | --- | --- | --- |
+| Left stick | The pointer: slow and precise near the centre, faster after a moment at full tilt, slower over buttons; pushed against the screen's edge it scrolls the park | | |
+| Touchpad | The pointer, like a laptop's; a click is Cross | | |
+| D-pad | Jump to the nearest button that way (up reaches the toolbar) | Button to button; in lists row by row or cell by cell, scrolling them; along sliders; through dropdowns | Left/right turn, up/down slope |
+| Cross | Click, hold to drag | Click | Build the piece (held, keeps building) |
+| Square | Right click (removes scenery and paths) | Right click | Take the last piece away |
+| Circle | Leave the tool and close its window | Close the dropdown, or the window | Stop building |
+| Triangle | Rotate what is being placed; otherwise the park windows | | Chain lift |
+| Options | The build tools | | |
+| L1 / R1 | Rotate the view | Previous/next tab | Bank left/right |
+| L2 / R2 | Zoom out/in, towards the pointer | | |
+| Right stick | Scroll the park | Scroll the list under the pointer | |
+| R3 / L3 | Rotate the view / pause | | |
+
+Options and Triangle show radial menus in the middle of the screen: the build tools (ride, paths,
+scenery, land, water, clear scenery) and the park windows (rides, park, guests, staff, finances,
+research, messages, map). Hold the button, point with the stick, let go; or tap it, then point and
+press Cross. While placing scenery that can be raised, up and down on the d-pad raise and lower it.
+A dropdown opened with Cross gets the pointer on its current item once Cross is let go. Turning or
+sloping track from a special piece (a station platform) starts from plain track. Text boxes open the
+PS5 on-screen keyboard with the current text. The controller ticks lightly as the pointer jumps and
+thumps when a piece is built.
+
+Settings: the game's Controls options, *Gamepad deadzone* and *Gamepad sensitivity*, apply to the
+pointer too (the sensitivity scales its speed: 1.5 is the default).
 
 ## Importing the game files
 
@@ -229,10 +258,14 @@ so they need no de-tiling. Plan lines:
 | `arg ARGUMENT` | add to OpenRCT2's command line, e.g. `--verbose` |
 
 The harness also logs the renderer in use, how much of each captured frame is lit, and the frame
-rate every 300 frames. Plans: `console-boot`, `console-pointer`, `console-newgame`,
-`console-ingame` (rotate, zoom, both kinds of scrolling), `console-save`, `console-quickmenu`,
-`console-perf`, `console-import`, `console-list` (probes). They assume the title screen is up by
+rate every 300 frames. Plans: `console-boot`, `console-newgame`, `console-ingame` (rotate, zoom,
+scrolling), `console-save`, `console-filemenu`, `console-perf`, `console-import`, `console-list`
+(probes), and for the controller `console-stick`, `console-dpad` (title buttons, Load Game, Circle),
+`console-dpad-game` (toolbar, tabs, closing), `console-radial`, `console-track` (a miniature railway
+from the radial menu to built pieces), `console-path` (a bridge path) and `console-scenery`. Most
+start the first scenario by pointing at its button (`point`), and assume the title screen is up by
 frame 700, which holds when the object index exists (the first start after `reset` takes longer).
+`reset` deletes the player's own saves and settings on the console: use it only for first-run tests.
 
 Crashes: start klogsrv (`GET :8084/repository_install?filename=klogsrv_v0.9.elf`, then
 `GET :8084/loadpayload:klogsrv_v0.9.elf`; not autoloaded, gone after a reboot) and record it with

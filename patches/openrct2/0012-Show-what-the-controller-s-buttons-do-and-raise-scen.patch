@@ -1,0 +1,520 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Mon, 5 Oct 2026 10:13:26 +0200
+Subject: [PATCH] Show what the controller's buttons do, and raise scenery with
+ it, on the PS5
+
+The middle of the bottom toolbar, when it shows no news, lists what the buttons do right now:
+PlayStation symbols and key caps with a word each, for the park, a window under the pointer
+(with Tabs when it has them, Close when it can be closed), a dropdown, a radial menu, placing,
+and building track or a bridge path. The title screen has them at the bottom.
+
+While placing scenery that can be raised, up and down on the d-pad raise and lower it in height
+steps (WindowSceneryRaise), as holding Shift and moving the mouse does, while the pointer keeps
+moving it about. Triangle no longer opens the park windows while a tool is active, and Circle
+closes an error message on the way rather than stopping at it.
+
+The pointer follows the game's controller settings: the dead zone, and the sensitivity, which
+scales its speed as it does scrolling.
+---
+ src/openrct2-ui/UiContext.cpp           |   4 +
+ src/openrct2-ui/input/Gamepad.cpp       | 220 ++++++++++++++++++++++--
+ src/openrct2-ui/input/Gamepad.h         |   8 +
+ src/openrct2-ui/input/ShortcutManager.h |   6 +-
+ src/openrct2-ui/input/Shortcuts.cpp     |  20 ++-
+ src/openrct2-ui/windows/Scenery.cpp     |  24 +++
+ src/openrct2-ui/windows/Windows.h       |   3 +
+ 7 files changed, 264 insertions(+), 21 deletions(-)
+
+diff --git a/src/openrct2-ui/UiContext.cpp b/src/openrct2-ui/UiContext.cpp
+index 899fafd..542d5da 100644
+--- a/src/openrct2-ui/UiContext.cpp
++++ b/src/openrct2-ui/UiContext.cpp
+@@ -24,6 +24,7 @@
+ #include <cmath>
+ #include <cstdlib>
+ #include <memory>
++#include <openrct2-ui/input/Gamepad.h>
+ #include <openrct2-ui/input/InputManager.h>
+ #include <openrct2-ui/input/MouseInput.h>
+ #include <openrct2-ui/interface/Window.h>
+@@ -154,6 +155,9 @@ public:
+         auto bgColour = ThemeGetColour(WindowClass::chat, 0);
+         ChatDraw(rt, bgColour);
+         _inGameConsole.Draw(rt);
++#ifdef __PROSPERO__
++        Gamepad::drawHints(rt);
++#endif
+     }
+ 
+     // Window
+diff --git a/src/openrct2-ui/input/Gamepad.cpp b/src/openrct2-ui/input/Gamepad.cpp
+index 6a2652d..509ba01 100644
+--- a/src/openrct2-ui/input/Gamepad.cpp
++++ b/src/openrct2-ui/input/Gamepad.cpp
+@@ -26,7 +26,13 @@
+ #include <openrct2/Input.h>
+ #include <openrct2/OpenRCT2.h>
+ #include <openrct2/config/Config.h>
++#include <openrct2/drawing/ColourMap.h>
++#include <openrct2/drawing/Drawing.String.h>
++#include <openrct2/drawing/Drawing.h>
++#include <openrct2/drawing/Rectangle.h>
++#include <openrct2/drawing/Text.h>
+ #include <openrct2/interface/Window.h>
++#include <openrct2/management/NewsItem.h>
+ #include <openrct2/ride/RideConstruction.h>
+ #include <openrct2/ride/ted/TrackElementDescriptor.h>
+ #include <openrct2/ui/WindowManager.h>
+@@ -37,8 +43,6 @@ namespace OpenRCT2::Ui
+ {
+     using namespace OpenRCT2::Ui::Windows;
+ 
+-    // Below this tilt the stick counts as centred: worn sticks drift.
+-    static constexpr float kDeadzone = 0.08f;
+     // At full tilt the pointer crosses the window's height in this time...
+     static constexpr float kSecondsPerHeight = 1.0f;
+     // ...and once the stick has stayed there for kAccelerationDelay, it speeds up to
+@@ -609,7 +613,7 @@ namespace OpenRCT2::Ui
+         {
+             if (building == Building::track)
+                 RunShortcut(ShortcutId::kWindowRideConstructionChainLift);
+-            else if (inPark)
++            else if (inPark && !gInputFlags.has(InputFlag::toolActive))
+                 openRadialMenu(RadialMenu::park, Button::triangle);
+         }
+         if (fired(Button::options) && inPark)
+@@ -653,6 +657,12 @@ namespace OpenRCT2::Ui
+                     run(dy < 0 ? ShortcutId::kWindowRideConstructionSlopeUp : ShortcutId::kWindowRideConstructionSlopeDown);
+                 rumble(0, 0x2000, 15);
+             }
++            else if (dy != 0 && overPark && isToolActive(WindowClass::scenery) && WindowSceneryCanRaise())
++            {
++                // Up and down raise and lower the scenery being placed.
++                WindowSceneryRaise(-dy);
++                rumble(0, 0x1800, 12);
++            }
+             else
+             {
+                 handleDirection(dx, dy);
+@@ -716,11 +726,8 @@ namespace OpenRCT2::Ui
+             InputSetState(InputState::reset);
+             return;
+         }
+-        if (auto* error = windowMgr->FindByClass(WindowClass::error))
+-        {
+-            windowMgr->Close(*error);
+-            return;
+-        }
++        // Error messages go by themselves; one in the way does not use up the press.
++        windowMgr->CloseByClass(WindowClass::error);
+         if (GetCurrentTextBox().window.classification != WindowClass::null)
+         {
+             WindowCancelTextbox();
+@@ -906,15 +913,20 @@ namespace OpenRCT2::Ui
+         const float x = axis(SDL_CONTROLLER_AXIS_LEFTX);
+         const float y = axis(SDL_CONTROLLER_AXIS_LEFTY);
+         const float magnitude = std::hypot(x, y);
+-        if (magnitude > kDeadzone)
++        // The game's controller settings: the dead zone, and the sensitivity (0.5 to 3, 1.5 at
++        // first), which scales the pointer's speed as it does scrolling.
++        const auto& general = Config::Get().general;
++        const float deadzone = std::clamp(general.gamepadDeadzone / 32767.0f, 0.0f, 0.9f);
++        const float sensitivity = general.gamepadSensitivity / 1.5f;
++        if (magnitude > deadzone)
+         {
+-            const float tilt = std::min((magnitude - kDeadzone) / (1.0f - kDeadzone), 1.0f);
++            const float tilt = std::min((magnitude - deadzone) / (1.0f - deadzone), 1.0f);
+             _fullTiltSeconds = tilt > 0.95f ? _fullTiltSeconds + _frameSeconds : 0.0f;
+             const float acceleration = 1.0f
+                 + (kAccelerationFactor - 1.0f)
+                     * std::clamp((_fullTiltSeconds - kAccelerationDelay) / kAccelerationTime, 0.0f, 1.0f);
+             // Slow and precise near the centre, fast at full tilt.
+-            float speed = std::pow(tilt, 1.8f) * height / kSecondsPerHeight * acceleration;
++            float speed = std::pow(tilt, 1.8f) * height / kSecondsPerHeight * acceleration * sensitivity;
+             if (_fullTiltSeconds < kAccelerationDelay && TargetAt(pointer()).has_value())
+                 speed *= kButtonFriction;
+             moveX = x / magnitude * speed * _frameSeconds;
+@@ -1044,5 +1056,191 @@ namespace OpenRCT2::Ui
+             SDL_GameControllerRumble(controller, low, high, milliseconds);
+     }
+ 
++#pragma endregion
++
++#pragma region Button hints
++
++    enum class Glyph : uint8_t
++    {
++        cross,
++        circle,
++        square,
++        triangle,
++        dpad,
++        // Drawn as a key cap with the button's name.
++        named,
++    };
++
++    struct Hint
++    {
++        Glyph glyph;
++        const char* button; // for Glyph::named
++        const char* action;
++    };
++
++    // 9 by 9 symbols, one bit per pixel, the lowest 9 bits from left to right; in the PlayStation's
++    // colours.
++    static constexpr int32_t kGlyphSize = 9;
++    static constexpr std::array<std::array<uint16_t, kGlyphSize>, 5> kGlyphBits = { {
++        { 0x101, 0x183, 0x0C6, 0x06C, 0x038, 0x06C, 0x0C6, 0x183, 0x101 },
++        { 0x07C, 0x0C6, 0x183, 0x183, 0x183, 0x183, 0x183, 0x0C6, 0x07C },
++        { 0x1FF, 0x1FF, 0x183, 0x183, 0x183, 0x183, 0x183, 0x1FF, 0x1FF },
++        { 0x010, 0x038, 0x038, 0x06C, 0x06C, 0x0C6, 0x0C6, 0x1FF, 0x1FF },
++        { 0x038, 0x038, 0x038, 0x1FF, 0x1FF, 0x1FF, 0x038, 0x038, 0x038 },
++    } };
++    static constexpr std::array<Drawing::Colour, 5> kGlyphColours = {
++        Drawing::Colour::lightBlue,   Drawing::Colour::brightRed, Drawing::Colour::brightPink,
++        Drawing::Colour::brightGreen, Drawing::Colour::white,
++    };
++    static constexpr int32_t kHintHeight = 13;
++    static constexpr int32_t kHintGap = 10;
++
++    static std::vector<Hint> CurrentHints()
++    {
++        if (RadialMenuShown())
++            return { { Glyph::named, "L", "Point" }, { Glyph::cross, nullptr, "Choose" }, { Glyph::circle, nullptr, "Close" } };
++        if (InputGetState() == InputState::dropdownActive)
++            return { { Glyph::dpad, nullptr, "Move" },
++                     { Glyph::cross, nullptr, "Choose" },
++                     { Glyph::circle, nullptr, "Close" } };
++
++        std::vector<Hint> hints;
++        const auto position = ContextGetCursorState()->position;
++        if (gLegacyScene == LegacyScene::titleSequence)
++        {
++            hints = { { Glyph::dpad, nullptr, "Move" }, { Glyph::cross, nullptr, "Select" } };
++            if (!IsOverPark(position))
++                hints.push_back({ Glyph::circle, nullptr, "Close" });
++            return hints;
++        }
++
++        if (!IsOverPark(position))
++        {
++            auto* w = GetWindowManager()->FindFromPoint(position);
++            hints = { { Glyph::dpad, nullptr, "Move" }, { Glyph::cross, nullptr, "Select" } };
++            if (w != nullptr && IsNavigable(*w)
++                && std::count_if(
++                       w->widgets.begin(), w->widgets.end(),
++                       [](const Widget& widget) { return widget.type == WidgetType::tab && widget.isVisible(); })
++                    > 1)
++                hints.push_back({ Glyph::named, "L1 R1", "Tabs" });
++            if (w != nullptr && IsClosable(*w))
++                hints.push_back({ Glyph::circle, nullptr, "Close" });
++            return hints;
++        }
++
++        switch (BuildingMode())
++        {
++            case Building::track:
++                return { { Glyph::dpad, nullptr, "Piece" },         { Glyph::cross, nullptr, "Build" },
++                         { Glyph::square, nullptr, "Remove" },      { Glyph::named, "L1 R1", "Bank" },
++                         { Glyph::triangle, nullptr, "Lift hill" }, { Glyph::circle, nullptr, "Done" } };
++            case Building::path:
++                return { { Glyph::dpad, nullptr, "Piece" },
++                         { Glyph::cross, nullptr, "Build" },
++                         { Glyph::square, nullptr, "Remove" },
++                         { Glyph::circle, nullptr, "Done" } };
++            case Building::none:
++                break;
++        }
++        if (gInputFlags.has(InputFlag::toolActive))
++        {
++            hints = { { Glyph::cross, nullptr, "Place" } };
++            if (isToolActive(WindowClass::scenery) && WindowSceneryCanRaise())
++                hints.insert(hints.begin(), { Glyph::dpad, nullptr, "Height" });
++            if (RotateConstructionObject(false))
++                hints.push_back({ Glyph::triangle, nullptr, "Rotate" });
++            hints.push_back({ Glyph::circle, nullptr, "Done" });
++            return hints;
++        }
++        return { { Glyph::named, "OPTIONS", "Build" }, { Glyph::triangle, nullptr, "Park" },
++                 { Glyph::cross, nullptr, "Select" },  { Glyph::square, nullptr, "Remove" },
++                 { Glyph::named, "L1 R1", "Rotate" },  { Glyph::named, "L2 R2", "Zoom" } };
++    }
++
++    static int32_t GlyphWidth(const Hint& hint)
++    {
++        if (hint.glyph != Glyph::named)
++            return kGlyphSize;
++        return Drawing::getStringWidth(hint.button, FontStyle::small) + 6;
++    }
++
++    static void DrawGlyph(Drawing::RenderTarget& rt, const Hint& hint, const ScreenCoordsXY& at)
++    {
++        using namespace OpenRCT2::Drawing;
++        const auto black = getColourMap(Colour::black).darkest;
++        if (hint.glyph == Glyph::named)
++        {
++            // A key cap with the button's name.
++            const ScreenRect cap = { at + ScreenCoordsXY{ 0, -1 }, at + ScreenCoordsXY{ GlyphWidth(hint) - 1, kGlyphSize } };
++            Rectangle::fill(rt, cap, getColourMap(Colour::grey).midLight);
++            Rectangle::fill(
++                rt, { cap.Point1 + ScreenCoordsXY{ 1, 1 }, cap.Point2 - ScreenCoordsXY{ 1, 1 } },
++                getColourMap(Colour::black).light);
++            drawText(rt, at + ScreenCoordsXY{ 3, 0 }, hint.button, { Colour::white, FontStyle::small });
++            return;
++        }
++
++        const auto& bits = kGlyphBits[static_cast<size_t>(hint.glyph)];
++        const auto colour = getColourMap(kGlyphColours[static_cast<size_t>(hint.glyph)]).light;
++        // A shadow one pixel down and right keeps the symbol readable over any background.
++        for (const bool shadow : { true, false })
++        {
++            for (int32_t row = 0; row < kGlyphSize; row++)
++            {
++                for (int32_t column = 0; column < kGlyphSize; column++)
++                {
++                    if (!(bits[row] & (0x100 >> column)))
++                        continue;
++                    const auto pixel = at + ScreenCoordsXY{ column + shadow, row + shadow };
++                    Rectangle::fill(rt, { pixel, pixel }, shadow ? black : colour);
++                }
++            }
++        }
++    }
++
++    void Gamepad::drawHints(Drawing::RenderTarget& rt)
++    {
++        using namespace OpenRCT2::Drawing;
++        static ScreenRect lastArea{};
++
++        const auto hints = CurrentHints();
++        int32_t width = -kHintGap;
++        for (const auto& hint : hints)
++            width += GlyphWidth(hint) + 3 + getStringWidth(hint.action, FontStyle::medium) + kHintGap;
++
++        // In the middle of the bottom toolbar, where windows are out of reach anyway, unless it shows
++        // news; on the title screen at the bottom.
++        ScreenCoordsXY centre = { ContextGetWidth() / 2, ContextGetHeight() - kHintHeight / 2 - 3 };
++        if (auto* toolbar = GetWindowManager()->FindByClass(WindowClass::bottomToolbar))
++        {
++            centre = toolbar->windowPos + ScreenCoordsXY{ toolbar->width / 2, toolbar->height / 2 };
++            if (!News::IsQueueEmpty())
++            {
++                GfxSetDirtyBlocks(lastArea);
++                lastArea = {};
++                return;
++            }
++        }
++        const ScreenRect area = { centre - ScreenCoordsXY{ width / 2 + 6, kHintHeight / 2 + 1 },
++                                  centre + ScreenCoordsXY{ width / 2 + 6, kHintHeight / 2 + 1 } };
++
++        Rectangle::filter(rt, area, FilterPaletteID::paletteDarken2);
++        ScreenCoordsXY at = { area.GetLeft() + 6, area.GetTop() + 3 };
++        for (const auto& hint : hints)
++        {
++            DrawGlyph(rt, hint, at);
++            at.x += GlyphWidth(hint) + 3;
++            drawText(rt, at + ScreenCoordsXY{ 0, -1 }, hint.action, { Colour::white });
++            at.x += getStringWidth(hint.action, FontStyle::medium) + kHintGap;
++        }
++
++        // Drawn over the windows each frame: the area under it, and where it was, redraw next time.
++        GfxSetDirtyBlocks(area);
++        if (lastArea.Point1 != area.Point1 || lastArea.Point2 != area.Point2)
++            GfxSetDirtyBlocks(lastArea);
++        lastArea = area;
++    }
++
+ #pragma endregion
+ } // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/Gamepad.h b/src/openrct2-ui/input/Gamepad.h
+index 4be8d00..5ff9a6f 100644
+--- a/src/openrct2-ui/input/Gamepad.h
++++ b/src/openrct2-ui/input/Gamepad.h
+@@ -17,6 +17,11 @@
+ typedef struct _SDL_GameController SDL_GameController;
+ struct SDL_Window;
+ 
++namespace OpenRCT2::Drawing
++{
++    struct RenderTarget;
++}
++
+ namespace OpenRCT2::Ui::Windows
+ {
+     enum class RadialMenu : uint8_t;
+@@ -45,6 +50,9 @@ namespace OpenRCT2::Ui
+         // there was one.
+         static bool scrollList(const ScreenCoordsXY& delta);
+ 
++        // Draws what the buttons do now, at the bottom of the screen.
++        static void drawHints(Drawing::RenderTarget& rt);
++
+     private:
+         enum Button : uint8_t
+         {
+diff --git a/src/openrct2-ui/input/ShortcutManager.h b/src/openrct2-ui/input/ShortcutManager.h
+index e2b5098..b29ddde 100644
+--- a/src/openrct2-ui/input/ShortcutManager.h
++++ b/src/openrct2-ui/input/ShortcutManager.h
+@@ -149,7 +149,7 @@ namespace OpenRCT2::Ui
+         static std::string_view getLegacyShortcutId(size_t index);
+     };
+ 
+-    // Rotates the object being placed or built (the rotate construction object shortcut); returns
+-    // whether there was one.
+-    bool RotateConstructionObject();
++    // Rotates the object being placed or built (the rotate construction object shortcut), or with
++    // rotate false only checks; returns whether there was one.
++    bool RotateConstructionObject(bool rotate = true);
+ } // namespace OpenRCT2::Ui
+diff --git a/src/openrct2-ui/input/Shortcuts.cpp b/src/openrct2-ui/input/Shortcuts.cpp
+index b7eb9eb..82ce601 100644
+--- a/src/openrct2-ui/input/Shortcuts.cpp
++++ b/src/openrct2-ui/input/Shortcuts.cpp
+@@ -79,7 +79,7 @@ static void ToggleViewFlag(int32_t viewportFlag)
+     }
+ }
+ 
+-bool OpenRCT2::Ui::RotateConstructionObject()
++bool OpenRCT2::Ui::RotateConstructionObject(bool rotate)
+ {
+     if (gLegacyScene == LegacyScene::titleSequence)
+         return false;
+@@ -91,7 +91,8 @@ bool OpenRCT2::Ui::RotateConstructionObject()
+     if (w != nullptr && !widgetIsDisabled(*w, WC_SCENERY__WIDX_SCENERY_ROTATE_OBJECTS_BUTTON)
+         && w->widgets[WC_SCENERY__WIDX_SCENERY_ROTATE_OBJECTS_BUTTON].isVisible())
+     {
+-        w->onMouseUp(WC_SCENERY__WIDX_SCENERY_ROTATE_OBJECTS_BUTTON);
++        if (rotate)
++            w->onMouseUp(WC_SCENERY__WIDX_SCENERY_ROTATE_OBJECTS_BUTTON);
+         return true;
+     }
+ 
+@@ -103,7 +104,8 @@ bool OpenRCT2::Ui::RotateConstructionObject()
+         // Check if building a maze...
+         if (w->widgets[WC_RIDE_CONSTRUCTION__WIDX_ROTATE].tooltip != STR_RIDE_CONSTRUCTION_BUILD_MAZE_IN_THIS_DIRECTION_TIP)
+         {
+-            w->onMouseUp(WC_RIDE_CONSTRUCTION__WIDX_ROTATE);
++            if (rotate)
++                w->onMouseUp(WC_RIDE_CONSTRUCTION__WIDX_ROTATE);
+             return true;
+         }
+     }
+@@ -113,7 +115,8 @@ bool OpenRCT2::Ui::RotateConstructionObject()
+     if (w != nullptr && !widgetIsDisabled(*w, WC_TRACK_DESIGN_LIST__WIDX_ROTATE)
+         && w->widgets[WC_TRACK_DESIGN_LIST__WIDX_ROTATE].isVisible())
+     {
+-        w->onMouseUp(WC_TRACK_DESIGN_LIST__WIDX_ROTATE);
++        if (rotate)
++            w->onMouseUp(WC_TRACK_DESIGN_LIST__WIDX_ROTATE);
+         return true;
+     }
+ 
+@@ -122,7 +125,8 @@ bool OpenRCT2::Ui::RotateConstructionObject()
+     if (w != nullptr && !widgetIsDisabled(*w, WC_TRACK_DESIGN_PLACE__WIDX_ROTATE)
+         && w->widgets[WC_TRACK_DESIGN_PLACE__WIDX_ROTATE].isVisible())
+     {
+-        w->onMouseUp(WC_TRACK_DESIGN_PLACE__WIDX_ROTATE);
++        if (rotate)
++            w->onMouseUp(WC_TRACK_DESIGN_PLACE__WIDX_ROTATE);
+         return true;
+     }
+ 
+@@ -131,7 +135,8 @@ bool OpenRCT2::Ui::RotateConstructionObject()
+     if (w != nullptr && !widgetIsDisabled(*w, WC_EDITOR_PARK_ENTRANCE__WIDX_ROTATE_ENTRANCE_BUTTON)
+         && w->widgets[WC_EDITOR_PARK_ENTRANCE__WIDX_ROTATE_ENTRANCE_BUTTON].isVisible())
+     {
+-        w->onMouseUp(WC_EDITOR_PARK_ENTRANCE__WIDX_ROTATE_ENTRANCE_BUTTON);
++        if (rotate)
++            w->onMouseUp(WC_EDITOR_PARK_ENTRANCE__WIDX_ROTATE_ENTRANCE_BUTTON);
+         return true;
+     }
+ 
+@@ -140,7 +145,8 @@ bool OpenRCT2::Ui::RotateConstructionObject()
+     if (w != nullptr && !widgetIsDisabled(*w, WC_TILE_INSPECTOR__WIDX_BUTTON_ROTATE)
+         && w->widgets[WC_TILE_INSPECTOR__WIDX_BUTTON_ROTATE].isVisible())
+     {
+-        w->onMouseUp(WC_TILE_INSPECTOR__WIDX_BUTTON_ROTATE);
++        if (rotate)
++            w->onMouseUp(WC_TILE_INSPECTOR__WIDX_BUTTON_ROTATE);
+         return true;
+     }
+     return false;
+diff --git a/src/openrct2-ui/windows/Scenery.cpp b/src/openrct2-ui/windows/Scenery.cpp
+index 7f3d808..007b036 100644
+--- a/src/openrct2-ui/windows/Scenery.cpp
++++ b/src/openrct2-ui/windows/Scenery.cpp
+@@ -86,6 +86,11 @@ namespace OpenRCT2::Ui::Windows
+     constexpr int32_t kTabWidth = 31;
+     constexpr int32_t kTabHeight = 28;
+     constexpr int32_t kReservedTabCount = 2;
++
++    // How far a controller has raised the scenery being placed (WindowSceneryRaise).
++    static int32_t _raisedBy = 0;
++    // Whether the scenery being placed can be raised at all.
++    static bool _canRaise = false;
+     constexpr int32_t kMaxTabs = 257; // 255 selected tabs + misc + all
+     constexpr int32_t kMaxTabsPerRow = 20;
+ 
+@@ -252,6 +257,7 @@ namespace OpenRCT2::Ui::Windows
+             gSceneryCtrlPressed = false;
+             gSceneryShiftPressed = false;
+             _selectedScenery = {};
++            _raisedBy = 0;
+             _hoverCounter = 0;
+             gSceneryGhostType = 0;
+             gSceneryPlaceCost = kMoney64Undefined;
+@@ -2400,6 +2406,7 @@ namespace OpenRCT2::Ui::Windows
+ 
+         void updatePlacementUpdateScreenCoordsAndButtonsPressed(bool canRaiseItem, ScreenCoordsXY& screenPos)
+         {
++            _canRaise = canRaiseItem || getGameState().cheats.disableSupportLimits;
+             if (!canRaiseItem && !getGameState().cheats.disableSupportLimits)
+             {
+                 gSceneryCtrlPressed = false;
+@@ -2469,6 +2476,13 @@ namespace OpenRCT2::Ui::Windows
+                         gSceneryShiftPressed = false;
+                     }
+                 }
++
++                // A controller raises it in steps instead, and the pointer keeps moving it.
++                if (_raisedBy != 0 && !im.isModifierKeyPressed(ModifierKey::shift))
++                {
++                    gSceneryShiftPressed = true;
++                    gSceneryShiftPressZOffset = _raisedBy;
++                }
+             }
+         }
+ 
+@@ -3535,6 +3549,16 @@ namespace OpenRCT2::Ui::Windows
+         }
+     }
+ 
++    void WindowSceneryRaise(int32_t steps)
++    {
++        _raisedBy = std::max(0, _raisedBy + steps * kCoordsZStep);
++    }
++
++    bool WindowSceneryCanRaise()
++    {
++        return _canRaise;
++    }
++
+     // Used after removing objects, in order to avoid crashes.
+     void WindowSceneryResetSelectedSceneryItems()
+     {
+diff --git a/src/openrct2-ui/windows/Windows.h b/src/openrct2-ui/windows/Windows.h
+index 8534702..20d98a0 100644
+--- a/src/openrct2-ui/windows/Windows.h
++++ b/src/openrct2-ui/windows/Windows.h
+@@ -311,6 +311,9 @@ namespace OpenRCT2::Ui::Windows
+         const ScenerySelection& sceneryconst, std::optional<Drawing::Colour> primary, std::optional<Drawing::Colour> secondary,
+         std::optional<Drawing::Colour> tertiary, std::optional<uint8_t> rotation);
+     void WindowScenerySetSelectedTab(ObjectEntryIndex sceneryGroupIndex);
++    // Raises (or lowers, with a negative count) the scenery being placed by height steps.
++    void WindowSceneryRaise(int32_t steps);
++    bool WindowSceneryCanRaise();
+     void WindowScenerySetDefaultPlacementConfiguration();
+     void WindowSceneryInit();
+     void WindowSceneryResetSelectedSceneryItems();
