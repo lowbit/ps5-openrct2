@@ -173,8 +173,8 @@ if ! built icu; then
     done_with icu
 fi
 
-# SDL2 with ps5-payload-dev's PS5 drivers: VideoOut framebuffer, AudioOut, ScePad, the USB
-# keyboard and the IME dialog, plus the changes in patches/sdl. No OpenGL (OSMesa).
+# SDL2 with ps5-payload-dev's PS5 drivers: VideoOut framebuffer, AudioOut, ScePad and the IME
+# dialog, plus the changes in patches/sdl. No OpenGL (OSMesa).
 if ! built sdl2; then
     fetch SDL-ee4c47dc.tar.gz 869cf9d26ae7ff9f73c05762f0a5cc988655d90bd7ce9167c4d4e0d76634dd31 \
         https://github.com/ps5-payload-dev/SDL/archive/ee4c47dc0d617b3bc8f35108f9956baf228a1322.tar.gz

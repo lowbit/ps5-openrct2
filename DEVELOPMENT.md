@@ -9,9 +9,10 @@ playing at 56 to 58 frames per second, saving, and importing the game files into
 from a PC (2457 files, 671 MB, in about 2.5 minutes), after which the game starts by itself. It is
 played with the DualSense alone (Controls, below); console tests drove the menus, lists, tabs,
 radial menus, track and path building and scenery placement with it. Not yet confirmed on
-hardware: how the controls feel in a person's hands, typing in the IME dialog (it opens), the
-sound, a ZIP import, and an import from a phone's browser. Mouse and keyboard support is in the
-SDL patches but untested, and Rijad does not plan to use either.
+hardware: how the controls feel in a person's hands, typing in the IME dialog (it opens), a ZIP
+import, and an import from a phone's browser. The sound works (Rijad heard it, 2026-10-05). The
+controller is the only input: mice, USB keyboards and the TV remote are not read, and text comes
+from the on-screen keyboard.
 
 ## Layout
 
@@ -83,7 +84,7 @@ offers, instead of guessing from compile-only checks.
   `libkernel_sys`, `libkernel_web` (and `libmonosgen`). Anything bound to them would be null at
   run time, so such an import now fails to link instead (oot64-ps5 found this for WebKit; our first
   `popen` crash was the same thing). `src/runtime/stubs/<module>.txt` lists functions of modules the
-  SDK has no stubs for (`libSceMouse`, `libSceCommonDialog`).
+  SDK has no stubs for (`libSceCommonDialog`).
 - `ps5-native-tool` rejects weak symbols nothing defines: zstd is built with `ZSTD_TRACE=0`, and the
   runtime defines `__cxa_thread_atexit_impl`.
 
@@ -93,7 +94,8 @@ offers, instead of guessing from compile-only checks.
   video driver gives a VideoOut framebuffer, which is what the software renderer needs: OpenRCT2
   0.5.5 has no plain software engine any more, only `softwareWithHardwareDisplay`, which goes
   through SDL_Renderer, and SDL's software renderer draws into that framebuffer. The fork also has
-  AudioOut, ScePad, the USB keyboard and the IME dialog. ps5-opengl's SDL2 bridge (used by
+  AudioOut, ScePad and the IME dialog (and USB keyboard and TV remote input, which the port
+  removes). ps5-opengl's SDL2 bridge (used by
   oot64-ps5 and morrowind-ps5) offers only an OpenGL window: no window surface, no SDL_Renderer,
   no audio, no mouse; it is the route for OpenRCT2's OpenGL engine (GL 3.3 core) later.
 - **ICU:** built (78.3), not patched out. OpenRCT2 uses it for UTF conversions, upper-casing, five
@@ -135,18 +137,19 @@ offers, instead of guessing from compile-only checks.
 1. No dynamic API (linked statically).
 2. No unconditional `-lsamplerate` on the PS5.
 3. `PS5_FrameCallback`: the application sees each finished frame (console tests capture there).
-4. The driver loads the keyboard and IME modules itself (a native title gets them only when it
-   loads them; the first boot crashed calling `sceKeyboardInit`), initialises the common dialog
+4. The on-screen keyboard is the only keyboard: the fork's USB keyboard and TV remote (HDMI-CEC
+   buttons reported as keys) input is gone, since the controller is the only input. The driver
+   loads the IME module itself (a native title gets it only when it loads it; the first boot
+   crashed calling the keyboard library before it was loaded), initialises the common dialog
    library before the IME, and decodes the IME's UTF-16 result (`wcstombs` only managed ASCII).
-5. USB and Bluetooth mice through libSceMouse (40-byte samples; layout from ProsperoLight), and a
-   cursor drawn in software into each frame and taken out again (the application's own cursors,
-   or a built-in arrow or hand at TV size). It appears once a pointer is in use, so games played
-   with a controller only see none. The window gets mouse and keyboard focus.
-6. The DualSense touchpad through SDL's game controller touchpad API, and `PS5_PadCallback`, which
-   sees each controller state before SDL does (console tests inject input there).
-7. Text from USB keyboards (US layout; the keyboard library reports keys only), and
    `PS5_SetScreenKeyboardText`: the next IME dialog starts with the application's text and its
    result replaces it (End, then Backspace per character, then the text and Return).
+5. A pointer the application moves (`SDL_WarpMouseInWindow`), with a cursor drawn in software into
+   each frame and taken out again (the application's own cursors, or a built-in arrow or hand at
+   TV size). It appears once the pointer has moved, so a game that does not use one shows none.
+   Mice are not read. The window gets mouse and keyboard focus.
+6. The DualSense touchpad through SDL's game controller touchpad API, and `PS5_PadCallback`, which
+   sees each controller state before SDL does (console tests inject input there).
 
 ## Changes to OpenRCT2 (`patches/openrct2`)
 
@@ -261,8 +264,9 @@ The harness also logs the renderer in use, how much of each captured frame is li
 rate every 300 frames. Plans: `console-boot`, `console-newgame`, `console-ingame` (rotate, zoom,
 scrolling), `console-save`, `console-filemenu`, `console-perf`, `console-import`, `console-list`
 (probes), and for the controller `console-stick`, `console-dpad` (title buttons, Load Game, Circle),
-`console-dpad-game` (toolbar, tabs, closing), `console-radial`, `console-track` (a miniature railway
-from the radial menu to built pieces), `console-path` (a bridge path) and `console-scenery`. Most
+`console-dpad-game` (toolbar, tabs, closing), `console-radial`, `console-ime` (a text box asks for
+the on-screen keyboard), `console-track` (a miniature railway from the radial menu to built
+pieces), `console-path` (a bridge path) and `console-scenery`. Most
 start the first scenario by pointing at its button (`point`), and assume the title screen is up by
 frame 700, which holds when the object index exists (the first start after `reset` takes longer).
 `reset` deletes the player's own saves and settings on the console: use it only for first-run tests.
@@ -306,5 +310,4 @@ image) to `E:\scratch\rct2`: `Data` (with `g1.dat`), `ObjData` (2122 objects), `
 - zlib 1.3.2, libpng 1.6.59, zstd 1.5.7, libzip 1.11.4, libogg 1.3.6, libvorbis 1.3.7, FLAC 1.5.0,
   nlohmann/json 3.11.3, ICU 78.3, qrcodegen 1.8.0, DejaVu Sans (rendered into the import screen's
   fonts)
-- libSceMouse's data layout and the keyboard and mouse module IDs from ProsperoLight
-  (GPL-3.0-or-later); the upload server and page are the DOOM port's, reworked
+- The upload server and page are the DOOM port's, reworked

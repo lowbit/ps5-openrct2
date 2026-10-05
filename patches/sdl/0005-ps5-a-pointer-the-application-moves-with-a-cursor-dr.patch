@@ -1,26 +1,28 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rijads <spaha92@gmail.com>
-Date: Sun, 4 Oct 2026 20:22:01 +0200
-Subject: [PATCH] ps5: USB and Bluetooth mice, and a cursor drawn in software
+Date: Mon, 5 Oct 2026 10:30:53 +0200
+Subject: [PATCH] ps5: a pointer the application moves, with a cursor drawn in
+ software
 
-Mice come through libSceMouse. The PS5 has no hardware cursor, so the current cursor (an
-application's own, or a built-in arrow or hand) is drawn into each frame before it is shown and
-the pixels under it are put back afterwards. It appears once a pointer is in use, so games played
-with a controller only see no cursor. The window gets mouse and keyboard focus.
+The PS5 has no hardware cursor, so the current cursor (an application's own, or a built-in arrow
+or hand at TV size) is drawn into each frame before it is shown and the pixels under it are put
+back afterwards. It appears once the application has moved the pointer with
+SDL_WarpMouseInWindow, so a game that does not use one shows no arrow. Mice are not read. The
+window gets mouse and keyboard focus.
 ---
- src/video/ps5/SDL_ps5mouse.c | 361 +++++++++++++++++++++++++++++++++++
- src/video/ps5/SDL_ps5mouse.h |  42 ++++
- src/video/ps5/SDL_ps5video.c |  24 +++
- 3 files changed, 427 insertions(+)
+ src/video/ps5/SDL_ps5mouse.c | 275 +++++++++++++++++++++++++++++++++++
+ src/video/ps5/SDL_ps5mouse.h |  39 +++++
+ src/video/ps5/SDL_ps5video.c |  23 +++
+ 3 files changed, 337 insertions(+)
  create mode 100644 src/video/ps5/SDL_ps5mouse.c
  create mode 100644 src/video/ps5/SDL_ps5mouse.h
 
 diff --git a/src/video/ps5/SDL_ps5mouse.c b/src/video/ps5/SDL_ps5mouse.c
 new file mode 100644
-index 00000000..8df760ea
+index 00000000..10b2b1c7
 --- /dev/null
 +++ b/src/video/ps5/SDL_ps5mouse.c
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,275 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2018 Sam Lantinga <slouken@libsdl.org>
@@ -42,11 +44,11 @@ index 00000000..8df760ea
 +  3. This notice may not be removed or altered from any source distribution.
 +*/
 +
-+/* USB and Bluetooth mice through libSceMouse, and a cursor drawn in software: the PS5 has no
-+   hardware cursor, so the current cursor is drawn into each frame before it is shown and the
-+   pixels under it are put back afterwards. The cursor appears once a pointer is in use (a mouse
-+   moved, or the application warped the pointer), so games played with a controller only do not
-+   get an arrow in the middle of the screen. */
++/* The pointer the application moves (SDL_WarpMouseInWindow), with the cursor drawn in software:
++   the PS5 has no hardware cursor, so the current cursor is drawn into each frame before it is
++   shown and the pixels under it are put back afterwards. Mice are not read, as the title is played
++   with a controller alone. The cursor appears once the application has moved the pointer, so a
++   game that does not use one gets no arrow in the middle of the screen. */
 +
 +#include "../../SDL_internal.h"
 +
@@ -57,36 +59,6 @@ index 00000000..8df760ea
 +#include "SDL_events.h"
 +#include "../../events/SDL_mouse_c.h"
 +
-+#define PS5_SYSMODULE_MOUSE 0x00a9
-+#define PS5_MOUSE_SLOTS 4
-+#define PS5_MOUSE_BATCH 32
-+#define PS5_MOUSE_INTERCEPTED 0x80000000u
-+
-+typedef struct
-+{
-+    uint64_t timestamp;
-+    uint8_t connected;
-+    uint8_t padding[3];
-+    uint32_t buttons;
-+    int32_t x;
-+    int32_t y;
-+    int32_t wheel;
-+    int32_t tilt;
-+    uint8_t reserved[8];
-+} PS5_MouseData;
-+
-+typedef struct
-+{
-+    uint8_t behavior;
-+    uint8_t reserved[7];
-+} PS5_MouseOpenParam;
-+
-+int sceSysmoduleLoadModule(uint32_t id);
-+int sceUserServiceGetForegroundUser(int *user_id);
-+int sceMouseInit(void);
-+int sceMouseOpen(int user_id, int type, int index, const PS5_MouseOpenParam *param);
-+int sceMouseRead(int handle, PS5_MouseData *data, int count);
-+
 +typedef struct
 +{
 +    SDL_Surface *image; /* SDL_PIXELFORMAT_ABGR8888, the window surface's format */
@@ -94,8 +66,6 @@ index 00000000..8df760ea
 +    int hot_y;
 +} PS5_CursorData;
 +
-+static int mouse_handles[PS5_MOUSE_SLOTS];
-+static uint32_t mouse_buttons[PS5_MOUSE_SLOTS];
 +static SDL_Cursor *shown_cursor;
 +static SDL_bool pointer_in_use;
 +
@@ -253,9 +223,6 @@ index 00000000..8df760ea
 +void PS5_Mouse_Init(void)
 +{
 +    SDL_Mouse *mouse = SDL_GetMouse();
-+    PS5_MouseOpenParam param;
-+    int user_id = 0;
-+    int i;
 +
 +    mouse->CreateCursor = PS5_CreateCursor;
 +    mouse->CreateSystemCursor = PS5_CreateSystemCursor;
@@ -263,57 +230,6 @@ index 00000000..8df760ea
 +    mouse->FreeCursor = PS5_FreeCursor;
 +    mouse->WarpMouse = PS5_WarpMouse;
 +    SDL_SetDefaultCursor(PS5_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW));
-+
-+    for (i = 0; i < PS5_MOUSE_SLOTS; i++) {
-+        mouse_handles[i] = -1;
-+    }
-+    if (sceSysmoduleLoadModule(PS5_SYSMODULE_MOUSE) != 0 || sceMouseInit() != 0 ||
-+        sceUserServiceGetForegroundUser(&user_id) != 0) {
-+        return;
-+    }
-+    SDL_zero(param);
-+    for (i = 0; i < PS5_MOUSE_SLOTS; i++) {
-+        mouse_handles[i] = sceMouseOpen(user_id, 0, i, &param);
-+    }
-+}
-+
-+void PS5_Mouse_PumpEvents(void)
-+{
-+    static const Uint8 buttons[] = { SDL_BUTTON_LEFT, SDL_BUTTON_RIGHT, SDL_BUTTON_MIDDLE, SDL_BUTTON_X1, SDL_BUTTON_X2 };
-+    SDL_Window *window = SDL_GetMouseFocus();
-+    PS5_MouseData samples[PS5_MOUSE_BATCH];
-+    int slot, i, b;
-+
-+    for (slot = 0; slot < PS5_MOUSE_SLOTS; slot++) {
-+        int count;
-+
-+        if (mouse_handles[slot] < 0) {
-+            continue;
-+        }
-+        count = sceMouseRead(mouse_handles[slot], samples, PS5_MOUSE_BATCH);
-+        for (i = 0; i < count && i < PS5_MOUSE_BATCH; i++) {
-+            const PS5_MouseData *sample = &samples[i];
-+            uint32_t pressed = 0;
-+
-+            if (sample->connected && !(sample->buttons & PS5_MOUSE_INTERCEPTED)) {
-+                pressed = sample->buttons & 0x1f;
-+                if (sample->x || sample->y) {
-+                    pointer_in_use = SDL_TRUE;
-+                    SDL_SendMouseMotion(window, slot, 1, sample->x, sample->y);
-+                }
-+                if (sample->wheel) {
-+                    SDL_SendMouseWheel(window, slot, 0.0f, (float)sample->wheel, SDL_MOUSEWHEEL_NORMAL);
-+                }
-+            }
-+            for (b = 0; b < (int)SDL_arraysize(buttons); b++) {
-+                uint32_t bit = 1u << b;
-+                if ((pressed ^ mouse_buttons[slot]) & bit) {
-+                    SDL_SendMouseButton(window, slot, (pressed & bit) ? SDL_PRESSED : SDL_RELEASED, buttons[b]);
-+                }
-+            }
-+            mouse_buttons[slot] = pressed;
-+        }
-+    }
 +}
 +
 +SDL_bool PS5_Mouse_DrawCursor(SDL_Surface *surface)
@@ -384,10 +300,10 @@ index 00000000..8df760ea
 +/* vi: set ts=4 sw=4 expandtab: */
 diff --git a/src/video/ps5/SDL_ps5mouse.h b/src/video/ps5/SDL_ps5mouse.h
 new file mode 100644
-index 00000000..d9ff6196
+index 00000000..5ecd2c72
 --- /dev/null
 +++ b/src/video/ps5/SDL_ps5mouse.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,39 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2018 Sam Lantinga <slouken@libsdl.org>
@@ -417,11 +333,8 @@ index 00000000..d9ff6196
 +
 +#include "SDL_surface.h"
 +
-+/* Sets up the cursor callbacks and opens the connected mice. */
++/* Sets up the cursor callbacks and the pointer's warping. */
 +void PS5_Mouse_Init(void);
-+
-+/* Sends the mice's motion, buttons and wheel as SDL events. */
-+void PS5_Mouse_PumpEvents(void);
 +
 +/* Draws the current cursor into a frame that is about to be shown; returns whether it did. */
 +SDL_bool PS5_Mouse_DrawCursor(SDL_Surface *surface);
@@ -431,12 +344,12 @@ index 00000000..d9ff6196
 +
 +#endif /* SDL_ps5mouse_h_ */
 diff --git a/src/video/ps5/SDL_ps5video.c b/src/video/ps5/SDL_ps5video.c
-index cde02d0e..a08520f6 100644
+index 24e9085d..305dbfd6 100644
 --- a/src/video/ps5/SDL_ps5video.c
 +++ b/src/video/ps5/SDL_ps5video.c
-@@ -29,6 +29,10 @@
+@@ -28,6 +28,10 @@
+ #include "SDL_ps5video.h"
  #include "SDL_ps5keyboard.h"
- #include "SDL_ps5remote.h"
  #include "SDL_ps5osmesa.h"
 +#include "SDL_ps5mouse.h"
 +
@@ -445,7 +358,7 @@ index cde02d0e..a08520f6 100644
  
  /* Called with every finished frame before it is shown (the PS5 OpenRCT2 port captures frames
     for its console tests here). The pixels are SDL_PIXELFORMAT_ABGR8888. */
-@@ -77,12 +81,25 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
+@@ -76,12 +80,25 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
      SDL_Surface *surface;
      struct kevent evt;
      int junk;
@@ -471,7 +384,7 @@ index cde02d0e..a08520f6 100644
      if (PS5_FrameCallback) {
          PS5_FrameCallback(surface->pixels, surface->w, surface->h, surface->pitch);
      }
-@@ -105,6 +122,9 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
+@@ -104,6 +121,9 @@ static int PS5_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
                           (device_data->surface->w - surface->w) / 2,
                           (device_data->surface->h - surface->h) / 2);
      }
@@ -481,7 +394,7 @@ index cde02d0e..a08520f6 100644
  
      if (sceVideoOutSubmitFlip(device_data->handle, idx, 1, frame_id)) {
          return SDL_SetError("sceVideoOutSubmitFlip: %s", strerror(errno));
-@@ -265,6 +285,7 @@ static int PS5_VideoInit(_THIS)
+@@ -264,6 +284,7 @@ static int PS5_VideoInit(_THIS)
      }
  
      SDL_AddVideoDisplay(&display, SDL_FALSE);
@@ -489,20 +402,12 @@ index cde02d0e..a08520f6 100644
  
      return 0;
  }
-@@ -293,6 +314,8 @@ static void PS5_VideoQuit(_THIS)
+@@ -292,6 +313,8 @@ static void PS5_VideoQuit(_THIS)
  
  static int PS5_CreateWindow(_THIS, SDL_Window *window)
  {
 +    SDL_SetMouseFocus(window);
 +    SDL_SetKeyboardFocus(window);
      return 0;
- }
- 
-@@ -309,6 +332,7 @@ static void PS5_DestroyWindow(_THIS, SDL_Window *window)
- static void PS5_PumpEvents(_THIS)
- {
-     PS5_Keyboard_PumpEvents();
-+    PS5_Mouse_PumpEvents();
-     PS5_Remote_PumpEvents();
  }
  

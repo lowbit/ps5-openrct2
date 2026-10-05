@@ -1,0 +1,613 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Mon, 5 Oct 2026 10:30:53 +0200
+Subject: [PATCH] ps5: the on-screen keyboard is the only keyboard
+
+The title is played with a controller alone, so USB keyboards and the TV remote (HDMI-CEC buttons
+reported as keys) are not read. A native title gets libSceImeDialog only when it loads it, and
+calls into it crash until then; the IME dialog also needs the common dialog library set up first.
+Its result is UTF-16, which wcstombs only converted for ASCII in the C locale.
+
+PS5_SetScreenKeyboardText: the next dialog starts with the application's text, and its result
+replaces it (End, then Backspace per character, then the text and Return).
+---
+ src/video/ps5/SDL_ps5keyboard.c | 217 +++++++++-----------------------
+ src/video/ps5/SDL_ps5keyboard.h |   9 +-
+ src/video/ps5/SDL_ps5remote.c   | 188 ---------------------------
+ src/video/ps5/SDL_ps5remote.h   |  32 -----
+ src/video/ps5/SDL_ps5video.c    |   4 -
+ 5 files changed, 69 insertions(+), 381 deletions(-)
+ delete mode 100644 src/video/ps5/SDL_ps5remote.c
+ delete mode 100644 src/video/ps5/SDL_ps5remote.h
+
+diff --git a/src/video/ps5/SDL_ps5keyboard.c b/src/video/ps5/SDL_ps5keyboard.c
+index 06df1231..18251569 100644
+--- a/src/video/ps5/SDL_ps5keyboard.c
++++ b/src/video/ps5/SDL_ps5keyboard.c
+@@ -19,6 +19,10 @@
+   3. This notice may not be removed or altered from any source distribution.
+ */
+ 
++/* The PS5's on-screen keyboard (the IME dialog), the only keyboard there is: USB keyboards and TV
++   remotes are not read, as the title is played with a controller alone. Its result reaches the
++   application as SDL keyboard events and text. */
++
+ #include "../../SDL_internal.h"
+ 
+ #ifdef SDL_VIDEO_DRIVER_PS5
+@@ -31,16 +35,6 @@
+ 
+ #include "SDL_ps5keyboard.h"
+ 
+-typedef struct keyboard_state
+-{
+-    uint64_t junk0[2];
+-    uint8_t available;
+-    uint32_t junk1[2];
+-    uint32_t modifiers;
+-    uint16_t scankey[16];
+-    uint64_t junk3[4];
+-} keyboard_state_t;
+-
+ typedef enum SceImeDialogStatus
+ {
+     SCE_IME_DIALOG_STATUS_NONE,
+@@ -101,11 +95,11 @@ typedef struct SceImeDialogResult
+     int8_t reserved[12];
+ } SceImeDialogResult;
+ 
++/* A native title loads the module itself; its imports are null until then. */
++#define PS5_SYSMODULE_IME_DIALOG 0x0096
+ 
+-int sceKeyboardInit(void);
+-int sceKeyboardOpen(int, int, int, void *);
+-int sceKeyboardReadState(int, keyboard_state_t *);
+-int sceKeyboardClose(int);
++int sceSysmoduleLoadModule(uint32_t id);
++int sceCommonDialogInitialize(void);
+ 
+ int sceUserServiceInitialize(void *);
+ int sceUserServiceGetForegroundUser(int *);
+@@ -117,13 +111,17 @@ int sceImeDialogTerm(void);
+ SceImeDialogStatus sceImeDialogGetStatus(void);
+ 
+ 
+-static int g_keyboard_handle = -1;
+-static keyboard_state_t g_prev_keyboard_state = {0};
+-
+ static SceImeDialogStatus g_ime_dialog_status = SCE_IME_DIALOG_STATUS_NONE;
+ static wchar_t g_ime_dialog_title[0x80] = {0};
+ static wchar_t g_ime_dialog_text[0x800] = {0};
+ 
++/* Text the next screen keyboard starts with (UTF-8), and its length limit in characters; see
++   PS5_SetScreenKeyboardText. */
++static char *g_ime_initial_text;
++static uint32_t g_ime_max_length;
++/* Characters of the application's text the open dialog's result replaces. */
++static size_t g_ime_replaced;
++
+ static SceImeDialogParam g_ime_dialog_param =
+ {
+     .title = g_ime_dialog_title,
+@@ -131,44 +129,9 @@ static SceImeDialogParam g_ime_dialog_param =
+     .maxTextLength = sizeof(g_ime_dialog_text) / sizeof(g_ime_dialog_text[0])
+ };
+ 
+-int PS5_Keyboard_Open(void)
+-{
+-    int user_id;
+-    long junk;
+-    int err;
+-
+-    err = sceUserServiceGetForegroundUser(&user_id);
+-    if (err != 0) {
+-        return SDL_SetError("sceUserServiceGetForegroundUser: 0x%08x", err);
+-    }
+-
+-    g_ime_dialog_param.userId = user_id;
+-    g_keyboard_handle = sceKeyboardOpen(user_id, 0, 0, &junk);
+-    if (g_keyboard_handle <= 0) {
+-        return SDL_SetError("sceKeyboardOpen: 0x%08x", g_keyboard_handle);
+-    }
+-
+-    return 0;
+-}
+-
+-int PS5_Keyboard_Close(void)
+-{
+-    int err;
+-
+-    if (g_keyboard_handle <= 0) {
+-        return 0;
+-    }
+-
+-    err = sceKeyboardClose(g_keyboard_handle);
+-    if (err != 0) {
+-        return SDL_SetError("sceKeyboardClose: 0x%08x", err);
+-    }
+-
+-    return 0;
+-}
+-
+ int PS5_Keyboard_Init(void)
+ {
++    int user_id;
+     int err;
+ 
+     err = sceUserServiceInitialize(0);
+@@ -176,19 +139,27 @@ int PS5_Keyboard_Init(void)
+         return SDL_SetError("sceUserServiceInitialize: 0x%08x", err);
+     }
+ 
+-    err = sceKeyboardInit();
++    /* The IME dialog needs the common dialog library first; it may already be set up. */
++    sceCommonDialogInitialize();
++    err = sceSysmoduleLoadModule(PS5_SYSMODULE_IME_DIALOG);
+     if (err != 0) {
+-        return SDL_SetError("sceKeyboardInit: 0x%08x", err);
++        return SDL_SetError("sceSysmoduleLoadModule(IME dialog): 0x%08x", err);
+     }
+ 
++    err = sceUserServiceGetForegroundUser(&user_id);
++    if (err != 0) {
++        return SDL_SetError("sceUserServiceGetForegroundUser: 0x%08x", err);
++    }
++    g_ime_dialog_param.userId = user_id;
++
+     return 0;
+ }
+ 
+-static int PS5_ImeDialog_PumpEvents(void)
++int PS5_Keyboard_PumpEvents(void)
+ {
+     SceImeDialogStatus status = sceImeDialogGetStatus();
+     SceImeDialogResult result = {0};
+-    char text[0x800];
++    char *text;
+ 
+     if (g_ime_dialog_status == status) {
+         return 0;
+@@ -215,8 +186,21 @@ static int PS5_ImeDialog_PumpEvents(void)
+ 
+     switch (result.outcome) {
+     case SCE_IME_DIALOG_END_STATUS_OK:
+-        if (wcstombs(text, g_ime_dialog_text, sizeof(text)) >= 0) {
++        /* The dialog edited the application's text: delete that before sending the result. */
++        if (g_ime_replaced > 0) {
++            SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_END);
++            SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_END);
++            for (size_t i = 0; i < g_ime_replaced; i++) {
++                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_BACKSPACE);
++                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_BACKSPACE);
++            }
++        }
++        /* The dialog returns UTF-16 (wchar_t has 16 bits on the PS5). */
++        text = SDL_iconv_string("UTF-8", "UTF-16LE", (const char *)g_ime_dialog_text,
++                                SDL_wcslen(g_ime_dialog_text) * sizeof(g_ime_dialog_text[0]));
++        if (text) {
+             SDL_SendKeyboardText(text);
++            SDL_free(text);
+         }
+         SDL_SendKeyboardKeyAutoRelease(SDL_SCANCODE_RETURN);
+         break;
+@@ -233,112 +217,35 @@ static int PS5_ImeDialog_PumpEvents(void)
+     return 0;
+ }
+ 
+-int PS5_Keyboard_PumpEvents(void)
++SDL_bool PS5_HasScreenKeyboardSupport(_THIS)
+ {
+-    keyboard_state_t curr;
+-    uint32_t diff;
+-    int err;
+-
+-    PS5_ImeDialog_PumpEvents();
+-
+-    if (g_keyboard_handle <= 0) {
+-        return 0;
+-    }
+-
+-    err = sceKeyboardReadState(g_keyboard_handle, &curr);
+-    if (err != 0) {
+-        return SDL_SetError("sceKeyboardReadState: 0x%08x", err);
+-    }
+-
+-    if (!curr.available) {
+-        return 0;
+-    }
+-
+-    diff = g_prev_keyboard_state.modifiers ^ curr.modifiers;
+-    if (diff) {
+-        if (diff & 0x01) {
+-            if (g_prev_keyboard_state.modifiers & 0x01) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LCTRL);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LCTRL);
+-            }
+-        }
+-        if (diff & 0x02) {
+-            if (g_prev_keyboard_state.modifiers & 0x02) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LSHIFT);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LSHIFT);
+-            }
+-        }
+-        if (diff & 0x04) {
+-            if (g_prev_keyboard_state.modifiers & 0x04) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LALT);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LALT);
+-            }
+-        }
+-        if (diff & 0x08) {
+-            if (g_prev_keyboard_state.modifiers & 0x08) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_LGUI);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_LGUI);
+-            }
+-        }
+-        if (diff & 0x10) {
+-            if (g_prev_keyboard_state.modifiers & 0x10) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RCTRL);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RCTRL);
+-            }
+-        }
+-        if (diff & 0x20) {
+-            if (g_prev_keyboard_state.modifiers & 0x20) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RSHIFT);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RSHIFT);
+-            }
+-        }
+-        if (diff & 0x40) {
+-            if (g_prev_keyboard_state.modifiers & 0x40) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RALT);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RALT);
+-            }
+-        }
+-        if (diff & 0x80) {
+-            if (g_prev_keyboard_state.modifiers & 0x80) {
+-                SDL_SendKeyboardKey(SDL_RELEASED, SDL_SCANCODE_RGUI);
+-            } else {
+-                SDL_SendKeyboardKey(SDL_PRESSED, SDL_SCANCODE_RGUI);
+-            }
+-        }
+-    }
+-
+-    for (int i = 0; i < 16; i++) {
+-        if (g_prev_keyboard_state.scankey[i] == curr.scankey[i]) {
+-            continue;
+-        }
+-
+-        if (g_prev_keyboard_state.scankey[i] == 0) {
+-            SDL_SendKeyboardKey(SDL_PRESSED, curr.scankey[i]);
+-        } else {
+-            SDL_SendKeyboardKey(SDL_RELEASED, g_prev_keyboard_state.scankey[i]);
+-        }
+-    }
+-
+-    memcpy(&g_prev_keyboard_state, &curr, sizeof(curr));
+-
+-    return 0;
++    return SDL_TRUE;
+ }
+ 
+-SDL_bool PS5_HasScreenKeyboardSupport(_THIS)
++void PS5_SetScreenKeyboardText(const char *text, int max_length)
+ {
+-    return SDL_TRUE;
++    SDL_free(g_ime_initial_text);
++    g_ime_initial_text = text ? SDL_strdup(text) : NULL;
++    g_ime_max_length = max_length > 0 ? (uint32_t)max_length : 0;
+ }
+ 
+ void PS5_ShowScreenKeyboard(_THIS, SDL_Window *window)
+ {
++    const uint32_t capacity = SDL_arraysize(g_ime_dialog_text) - 1;
++
+     memset(g_ime_dialog_text, 0, sizeof(g_ime_dialog_text));
++    g_ime_replaced = 0;
++    if (g_ime_initial_text) {
++        char *wide = SDL_iconv_string("UTF-16LE", "UTF-8", g_ime_initial_text, SDL_strlen(g_ime_initial_text));
++        if (wide) {
++            SDL_memcpy(g_ime_dialog_text, wide, SDL_min(SDL_wcslen((wchar_t *)wide), capacity) * sizeof(wchar_t));
++            SDL_free(wide);
++        }
++        g_ime_replaced = SDL_utf8strlen(g_ime_initial_text);
++        SDL_free(g_ime_initial_text);
++        g_ime_initial_text = NULL;
++    }
++    g_ime_dialog_param.maxTextLength = g_ime_max_length && g_ime_max_length < capacity ? g_ime_max_length : capacity;
+     sceImeDialogInit(&g_ime_dialog_param, NULL);
+ }
+ 
+diff --git a/src/video/ps5/SDL_ps5keyboard.h b/src/video/ps5/SDL_ps5keyboard.h
+index 57c54e9f..6034c265 100644
+--- a/src/video/ps5/SDL_ps5keyboard.h
++++ b/src/video/ps5/SDL_ps5keyboard.h
+@@ -25,14 +25,19 @@
+ 
+ #include "../SDL_sysvideo.h"
+ 
++/* Sets up the on-screen keyboard (the IME dialog). */
+ int PS5_Keyboard_Init(void);
+-int PS5_Keyboard_Open(void);
++
++/* Sends the on-screen keyboard's result, once it closes, as keyboard events and text. */
+ int PS5_Keyboard_PumpEvents(void);
+-int PS5_Keyboard_Close(void);
+ 
+ SDL_bool PS5_HasScreenKeyboardSupport(_THIS);
+ SDL_bool PS5_IsScreenKeyboardShown(_THIS, SDL_Window *window);
+ 
++/* Exported for applications: the next screen keyboard starts with text (UTF-8), which its result
++   then replaces, and takes at most max_length characters (0: no limit of the application's). */
++void PS5_SetScreenKeyboardText(const char *text, int max_length);
++
+ void PS5_ShowScreenKeyboard(_THIS, SDL_Window *window);
+ void PS5_HideScreenKeyboard(_THIS, SDL_Window *window);
+ 
+diff --git a/src/video/ps5/SDL_ps5remote.c b/src/video/ps5/SDL_ps5remote.c
+deleted file mode 100644
+index 615aa00c..00000000
+--- a/src/video/ps5/SDL_ps5remote.c
++++ /dev/null
+@@ -1,188 +0,0 @@
+-/*
+-  Simple DirectMedia Layer
+-  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>
+-
+-  This software is provided 'as-is', without any express or implied
+-  warranty.  In no event will the authors be held liable for any damages
+-  arising from the use of this software.
+-
+-  Permission is granted to anyone to use this software for any purpose,
+-  including commercial applications, and to alter it and redistribute it
+-  freely, subject to the following restrictions:
+-
+-  1. The origin of this software must not be misrepresented; you must not
+-     claim that you wrote the original software. If you use this software
+-     in a product, an acknowledgment in the product documentation would be
+-     appreciated but is not required.
+-  2. Altered source versions must be plainly marked as such, and must not be
+-     misrepresented as being the original software.
+-  3. This notice may not be removed or altered from any source distribution.
+-*/
+-#include "../../SDL_internal.h"
+-
+-#ifdef SDL_VIDEO_DRIVER_PS5
+-
+-#include "SDL_error.h"
+-#include "SDL_events.h"
+-#include "SDL_stdinc.h"
+-
+-#include "../../events/SDL_keyboard_c.h"
+-#include "../../joystick/ps5/SDL_ps5joystick.h"
+-
+-#include "SDL_ps5remote.h"
+-
+-
+-static const struct
+-{
+-    Uint32 button;
+-    SDL_Scancode scancode;
+-} remote_btn_map[] = {
+-    { PS5_PAD_BUTTON_UP,      SDL_SCANCODE_UP },
+-    { PS5_PAD_BUTTON_DOWN,    SDL_SCANCODE_DOWN },
+-    { PS5_PAD_BUTTON_LEFT,    SDL_SCANCODE_LEFT },
+-    { PS5_PAD_BUTTON_RIGHT,   SDL_SCANCODE_RIGHT },
+-    { PS5_PAD_BUTTON_CROSS,   SDL_SCANCODE_RETURN },  // typically labeled "ok"
+-    { PS5_PAD_BUTTON_CIRCLE,  SDL_SCANCODE_ESCAPE },  // typically labeled "back"
+-    { PS5_PAD_BUTTON_OPTIONS, SDL_SCANCODE_MENU },
+-};
+-
+-/* All other remote keys are reported as a CEC key code in the pad state. */
+-static const SDL_Scancode remote_key_map[] = {
+-    SDL_SCANCODE_UNKNOWN,
+-    SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4,
+-    SDL_SCANCODE_5, SDL_SCANCODE_6, SDL_SCANCODE_7, SDL_SCANCODE_8,
+-    SDL_SCANCODE_9, SDL_SCANCODE_0,
+-    SDL_SCANCODE_MINUS,             // labeled as "11", on some Japanese RCs
+-    SDL_SCANCODE_EQUALS,            // labeled as "12", on some Japanese RCs
+-    SDL_SCANCODE_RETURN,
+-    SDL_SCANCODE_UNKNOWN,           // unknown (14)
+-    SDL_SCANCODE_ESCAPE,            // typically labeled "back"
+-    SDL_SCANCODE_UNKNOWN,           // unknown (16)
+-    SDL_SCANCODE_UNKNOWN,           // unknown (17)
+-    SDL_SCANCODE_MENU,
+-    SDL_SCANCODE_UNKNOWN,           // unknown (19)
+-    SDL_SCANCODE_AUDIOPREV,
+-    SDL_SCANCODE_AUDIONEXT,
+-    SDL_SCANCODE_AUDIOPLAY,
+-    SDL_SCANCODE_AUDIOREWIND,
+-    SDL_SCANCODE_AUDIOFASTFORWARD,
+-    SDL_SCANCODE_AUDIOSTOP,
+-    SDL_SCANCODE_PAUSE,             // typically labeled "pause"
+-    SDL_SCANCODE_APPLICATION,       // context menu
+-    SDL_SCANCODE_UNKNOWN,           // unknown (28)
+-    SDL_SCANCODE_UNKNOWN,           // unknown (29)
+-    SDL_SCANCODE_F1,                // typically labeled "subtitle"
+-    SDL_SCANCODE_F2,                // typically labeled "audio"
+-    SDL_SCANCODE_F3,                // typically labeled "camera"
+-    SDL_SCANCODE_F4,                // typically labeled "display"
+-    SDL_SCANCODE_UNKNOWN,           // unknown (34)
+-    SDL_SCANCODE_UNKNOWN,           // unknown (35)
+-    SDL_SCANCODE_F8,                // blue
+-    SDL_SCANCODE_F5,                // red
+-    SDL_SCANCODE_F6,                // green
+-    SDL_SCANCODE_F7,                // yellow
+-    SDL_SCANCODE_PERIOD,
+-    SDL_SCANCODE_PAGEUP,            // typically labeled "p+"
+-    SDL_SCANCODE_PAGEDOWN,          // typically labeled "p-"
+-    SDL_SCANCODE_BACKSPACE,         // typically labeled "prev"
+-    SDL_SCANCODE_F9,                // typically labeled "guide"
+-    SDL_SCANCODE_SPACE,             // typically labeled "play/pause"
+-};
+-
+-/* Index into PS5_PadData.unknown holding the CEC key code. */
+-#define PS5_REMOTE_KEY_OFFSET 3
+-
+-static int g_remote_handle = -1;
+-
+-static Uint8 g_remote_keys[SDL_NUM_SCANCODES];
+-
+-static void PS5_Remote_SetKeys(const Uint8 *keys)
+-{
+-    for (int i = 0; i < SDL_NUM_SCANCODES; i++) {
+-        if (keys[i] == g_remote_keys[i]) {
+-            continue;
+-        }
+-        SDL_SendKeyboardKey(keys[i] ? SDL_PRESSED : SDL_RELEASED,
+-                            (SDL_Scancode)i);
+-        g_remote_keys[i] = keys[i];
+-    }
+-}
+-
+-int PS5_Remote_Init(void)
+-{
+-    int handle;
+-    int err;
+-
+-    SDL_zeroa(g_remote_keys);
+-
+-    err = sceUserServiceInitialize(0);
+-    if (err != 0 && err != 0x80960003) {
+-        return SDL_SetError("sceUserServiceInitialize: 0x%08x", err);
+-    }
+-
+-    err = scePadInit();
+-    if (err != 0) {
+-        return SDL_SetError("scePadInit: 0x%08x", err);
+-    }
+-
+-    handle = scePadOpen(PS5_USER_ID_SYSTEM, PS5_PAD_PORT_TYPE_REMOTE_CONTROL,
+-                        0, NULL);
+-    if ((unsigned)handle == PS5_PAD_ERROR_ALREADY_OPENED) {
+-        handle = scePadGetHandle(PS5_USER_ID_SYSTEM,
+-                                 PS5_PAD_PORT_TYPE_REMOTE_CONTROL, 0);
+-    }
+-    if (handle <= 0) {
+-        return SDL_SetError("scePadOpen: 0x%08x", handle);
+-    }
+-
+-    g_remote_handle = handle;
+-
+-    return 0;
+-}
+-
+-void PS5_Remote_PumpEvents(void)
+-{
+-    Uint8 keys[SDL_NUM_SCANCODES];
+-    PS5_PadData pad = { 0 };
+-    Uint8 code;
+-
+-    if (g_remote_handle <= 0) {
+-        return;
+-    }
+-
+-    SDL_zeroa(keys);
+-
+-    // On read failure or disconnect, release anything still held down
+-    if (scePadReadState(g_remote_handle, &pad) == 0 && pad.connected) {
+-        for (int i = 0; i < SDL_arraysize(remote_btn_map); i++) {
+-            if (pad.buttons & remote_btn_map[i].button) {
+-                keys[remote_btn_map[i].scancode] = 1;
+-            }
+-        }
+-
+-        code = pad.unknown[PS5_REMOTE_KEY_OFFSET];
+-        if (code < SDL_arraysize(remote_key_map) &&
+-            remote_key_map[code] != SDL_SCANCODE_UNKNOWN) {
+-            keys[remote_key_map[code]] = 1;
+-        }
+-    }
+-
+-    PS5_Remote_SetKeys(keys);
+-}
+-
+-void PS5_Remote_Quit(void)
+-{
+-    Uint8 keys[SDL_NUM_SCANCODES];
+-
+-    SDL_zeroa(keys);
+-    PS5_Remote_SetKeys(keys);
+-
+-    if (g_remote_handle > 0) {
+-        scePadClose(g_remote_handle);
+-        g_remote_handle = -1;
+-    }
+-}
+-
+-#endif /* SDL_VIDEO_DRIVER_PS5 */
+-
+-/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/ps5/SDL_ps5remote.h b/src/video/ps5/SDL_ps5remote.h
+deleted file mode 100644
+index d64b50a8..00000000
+--- a/src/video/ps5/SDL_ps5remote.h
++++ /dev/null
+@@ -1,32 +0,0 @@
+-/*
+-  Simple DirectMedia Layer
+-  Copyright (C) 1997-2024 Sam Lantinga <slouken@libsdl.org>
+-
+-  This software is provided 'as-is', without any express or implied
+-  warranty.  In no event will the authors be held liable for any damages
+-  arising from the use of this software.
+-
+-  Permission is granted to anyone to use this software for any purpose,
+-  including commercial applications, and to alter it and redistribute it
+-  freely, subject to the following restrictions:
+-
+-  1. The origin of this software must not be misrepresented; you must not
+-     claim that you wrote the original software. If you use this software
+-     in a product, an acknowledgment in the product documentation would be
+-     appreciated but is not required.
+-  2. Altered source versions must be plainly marked as such, and must not be
+-     misrepresented as being the original software.
+-  3. This notice may not be removed or altered from any source distribution.
+-*/
+-#include "../../SDL_internal.h"
+-
+-#ifndef SDL_ps5remote_h_
+-#define SDL_ps5remote_h_
+-
+-int PS5_Remote_Init(void);
+-void PS5_Remote_PumpEvents(void);
+-void PS5_Remote_Quit(void);
+-
+-#endif /* SDL_ps5remote_h_ */
+-
+-/* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/ps5/SDL_ps5video.c b/src/video/ps5/SDL_ps5video.c
+index 2e79cbd2..24e9085d 100644
+--- a/src/video/ps5/SDL_ps5video.c
++++ b/src/video/ps5/SDL_ps5video.c
+@@ -27,7 +27,6 @@
+ 
+ #include "SDL_ps5video.h"
+ #include "SDL_ps5keyboard.h"
+-#include "SDL_ps5remote.h"
+ #include "SDL_ps5osmesa.h"
+ 
+ /* Called with every finished frame before it is shown (the PS5 OpenRCT2 port captures frames
+@@ -309,7 +308,6 @@ static void PS5_DestroyWindow(_THIS, SDL_Window *window)
+ static void PS5_PumpEvents(_THIS)
+ {
+     PS5_Keyboard_PumpEvents();
+-    PS5_Remote_PumpEvents();
+ }
+ 
+ static SDL_VideoDevice *PS5_CreateDevice(void)
+@@ -329,9 +327,7 @@ static SDL_VideoDevice *PS5_CreateDevice(void)
+         return NULL;
+     }
+ 
+-    PS5_Remote_Init();
+     PS5_Keyboard_Init();
+-    PS5_Keyboard_Open();
+ 
+     device->VideoInit = PS5_VideoInit;
+     device->VideoQuit = PS5_VideoQuit;
