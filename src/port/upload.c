@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "upload.h"
@@ -30,6 +32,9 @@
 #define SEND_TIMEOUT_S 5
 #define IDLE_LIMIT_S 30
 #define SOCKET_BUFFER (1024 * 1024)
+#define MAX_WAITING 8
+#define WAITING_LIMIT_S 15
+#define POLL_MS 250
 
 int sceKernelUsleep(unsigned microseconds);
 
@@ -413,32 +418,73 @@ static void handle(int fd)
         respond_text(fd, "404 Not Found", "Not found.");
 }
 
+/* Browsers open connections before they need them and may leave them quiet, so the server keeps
+ * several waiting and serves whichever sends a request first, one request at a time; waiting for
+ * the next request on a single connection blocked everyone else for up to IDLE_LIMIT_S. */
 static void *serve(void *argument)
 {
     struct timeval receive_timeout = { RECEIVE_TIMEOUT_S, 0 }, send_timeout = { SEND_TIMEOUT_S, 0 };
-    int yes = 1;
+    int yes = 1, waiting[MAX_WAITING], count = 0;
+    time_t since[MAX_WAITING];
 
     (void)argument;
     while (!stopping)
     {
-        int client = accept(listener, NULL, NULL);
-        if (client < 0)
+        struct pollfd fds[1 + MAX_WAITING];
+        fds[0].fd = listener;
+        fds[0].events = POLLIN;
+        for (int i = 0; i < count; i++)
         {
-            if (!stopping)
-                sceKernelUsleep(100000);
+            fds[1 + i].fd = waiting[i];
+            fds[1 + i].events = POLLIN;
+        }
+        if (poll(fds, (nfds_t)(1 + count), POLL_MS) < 0)
+        {
+            sceKernelUsleep(100000);
             continue;
         }
-        if (!stopping)
+
+        /* Connections that sent something (or closed) are served and closed, quiet ones dropped
+         * after WAITING_LIMIT_S. */
+        const time_t now = time(NULL);
+        int kept = 0;
+        for (int i = 0; i < count; i++)
         {
+            const int ready = fds[1 + i].revents != 0;
+            if (ready && !stopping)
+                handle(waiting[i]);
+            if (ready || stopping || now - since[i] > WAITING_LIMIT_S)
+            {
+                close(waiting[i]);
+                continue;
+            }
+            waiting[kept] = waiting[i];
+            since[kept++] = since[i];
+        }
+        count = kept;
+
+        if ((fds[0].revents & POLLIN) && !stopping)
+        {
+            int client = accept(listener, NULL, NULL);
+            if (client < 0)
+                continue;
+            if (count == MAX_WAITING)
+            {
+                close(waiting[0]);
+                memmove(waiting, waiting + 1, (size_t)--count * sizeof(waiting[0]));
+                memmove(since, since + 1, (size_t)count * sizeof(since[0]));
+            }
             setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout));
             setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
             /* A reply is two sends (head, body). With Nagle the body waits until the sender
              * acknowledges the head, which Windows delays by up to 200 ms per request. */
             setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
-            handle(client);
+            waiting[count] = client;
+            since[count++] = now;
         }
-        close(client);
     }
+    for (int i = 0; i < count; i++)
+        close(waiting[i]);
     return NULL;
 }
 
@@ -547,19 +593,7 @@ void upload_stop(void)
     if (!running)
         return;
     stopping = 1;
-
-    /* accept() does not return on its own; a connection to ourselves wakes the thread up. */
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd >= 0)
-    {
-        struct sockaddr_in self;
-        memset(&self, 0, sizeof(self));
-        self.sin_family = AF_INET;
-        self.sin_port = htons((uint16_t)port);
-        self.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        connect(fd, (struct sockaddr *)&self, sizeof(self));
-        close(fd);
-    }
+    /* The server thread sees it within POLL_MS. */
     pthread_join(server, NULL);
     close(listener);
     listener = -1;

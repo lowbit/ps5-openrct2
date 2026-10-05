@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Mon, 5 Oct 2026 17:11:04 +0200
+Subject: [PATCH] Hide the pointer, tooltips and the park's label while a
+ radial menu is up
+
+The stick points at the ring's entries, not the pointer, so it is hidden while the ring is up,
+the buttons have no tooltips, and the map tooltip (the label for what is under the pointer) stays
+closed: each could sit over the name of the highlighted entry under the ring.
+---
+ src/openrct2-ui/windows/MapTooltip.cpp |  3 ++-
+ src/openrct2-ui/windows/RadialMenu.cpp | 11 ++++++++++-
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/openrct2-ui/windows/MapTooltip.cpp b/src/openrct2-ui/windows/MapTooltip.cpp
+index e8dc402..a1c7c77 100644
+--- a/src/openrct2-ui/windows/MapTooltip.cpp
++++ b/src/openrct2-ui/windows/MapTooltip.cpp
+@@ -100,7 +100,8 @@ namespace OpenRCT2::Ui::Windows
+         auto& im = GetInputManager();
+         auto* wm = GetWindowManager();
+         if (_cursorHoldDuration < 25 || stringId == kStringIdNone || im.isModifierKeyPressed(ModifierKey::ctrl)
+-            || im.isModifierKeyPressed(ModifierKey::shift) || wm->FindByClass(WindowClass::error) != nullptr)
++            || im.isModifierKeyPressed(ModifierKey::shift) || wm->FindByClass(WindowClass::error) != nullptr
++            || wm->FindByClass(WindowClass::radialMenu) != nullptr)
+         {
+             auto* windowMgr = GetWindowManager();
+             windowMgr->CloseByClass(WindowClass::mapTooltip);
+diff --git a/src/openrct2-ui/windows/RadialMenu.cpp b/src/openrct2-ui/windows/RadialMenu.cpp
+index 3a10eff..2faad58 100644
+--- a/src/openrct2-ui/windows/RadialMenu.cpp
++++ b/src/openrct2-ui/windows/RadialMenu.cpp
+@@ -114,9 +114,18 @@ namespace OpenRCT2::Ui::Windows
+                 const auto topLeft = EntryCentre(i, _entries.size())
+                     - ScreenCoordsXY{ kButtonSize.width / 2, kButtonSize.height / 2 };
+                 _widgets[i] = makeRemapWidget(
+-                    topLeft, kButtonSize, WidgetType::trnBtn, WindowColour::tertiary, _entries[i].image, _entries[i].name);
++                    topLeft, kButtonSize, WidgetType::trnBtn, WindowColour::tertiary, _entries[i].image);
+             }
+             setWidgets(std::span<const Widget>(_widgets.data(), _entries.size()));
++            // The stick points at the entries, not the pointer, so it is hidden while the ring is up (and
++            // the park's label for what is under it with it, in MapTooltip.cpp), and the buttons have no
++            // tooltips to cover the name under the ring.
++            ContextHideCursor();
++        }
++
++        void onClose() override
++        {
++            ContextShowCursor();
+         }
+ 
+         // Highlights the entry in the direction (x, y), screen-wise; returns whether that changed.

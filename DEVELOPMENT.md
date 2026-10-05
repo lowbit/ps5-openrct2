@@ -25,6 +25,7 @@ from the on-screen keyboard.
 | `src/port/` | PS5 code compiled into the game: `main`, the import screen and its upload server and page, the console test harness |
 | `sce_sys/` | `param.json` and the icon (the OpenRCT2 logo on a dark background) |
 | `test/` | Console test plans |
+| `screenshots/` | For showing the port: the title, the import screen and its page, a park (Six Flags Magic Mountain) with the button hints, both radial menus, a list moved through with the d-pad. Console captures halved (the game draws at 960x540 and doubles each pixel); the import screen at full size |
 | `cmake/ps5.cmake` | CMake toolchain for the console |
 | `cmake/ps5-openrct2.cmake` | Hooked into OpenRCT2's project: adds `src/port`, qrcodegen, the generated headers and the static-only libraries |
 | `tools/ps5-cc`, `tools/ps5-c++`, `tools/ps5-link` | Compiler drivers for the console; any link produces a PS5 module |
@@ -228,8 +229,11 @@ RollerCoaster Tycoon 2 folder (chosen or dropped; only files below Data, ObjData
 Tracks and Landscapes are sent) or a ZIP file of it (for phones, which cannot send folders), and
 ends with `POST /done`. The server stores files below those folders only, each path part a plain
 name, as `<path>.upload` renamed when complete; the screen unpacks ZIP files with libzip under the
-same rules. The game starts once `Data/g1.dat` is there and the sender has finished. Circle closes
-the title. The screen draws with SDL and fonts rendered from DejaVu Sans at build time
+same rules. The server handles one request at a time but keeps up to eight connections waiting
+and serves whichever sends a request first: browsers open connections before they need them and
+may leave them quiet, and waiting on one of those (up to 30 s) used to stall the page and every
+upload. The game starts once `Data/g1.dat` is there and the sender has finished. Circle closes
+the title; the screen has no pointer. The screen draws with SDL and fonts rendered from DejaVu Sans at build time
 (`tools/make-font.py`), since OpenRCT2 cannot draw before the game's own files exist.
 
 `uv run --no-project python tools/send.py http://192.168.0.90:9666/ E:/scratch/rct2` sends a folder
@@ -291,7 +295,11 @@ report's list of loaded modules shows which imports can be null.
   about 30 ms per small file, once the server sets `TCP_NODELAY`. Without it each reply's body
   waited for Windows' delayed acknowledgement of the head (up to 200 ms), about 105 ms per file,
   and the whole folder took 7 minutes instead of 2.5 (that run also shared the network with
-  another upload).
+  another upload). Speeds vary from day to day: on the afternoon of 2026-10-05 the same import
+  took about 7 minutes again (1.6 MB/s). A probe (100 to 150 requests on fresh connections) put a
+  4 KB upload at 31 ms but a 120 KB one at 62 ms median, 126 to 146 ms mean, up to 377 ms, with
+  the old server and the new one alike, so the console's writes stalled, not the server. Reading
+  the 2457 files from `E:` (a 5400 rpm disk) also takes about 5 minutes when they are not cached.
 - Rest mode (the TV turned off) stops a running test; the payloads' listening sockets die with it.
 
 ## Game data

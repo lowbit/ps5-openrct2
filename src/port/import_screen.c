@@ -244,6 +244,9 @@ void ps5_import_game_data(const char *game_folder)
         printf("import: no renderer: %s\n", SDL_GetError());
         return;
     }
+    // No pointer here, though going full screen put it at 0, 0, where it would show; the game
+    // gets it back.
+    SDL_ShowCursor(SDL_DISABLE);
     font_t body = load_font(renderer, font_body_pixels, font_body_width, font_body_height, font_body_glyphs);
     font_t title = load_font(renderer, font_title_pixels, font_title_width, font_title_height, font_title_glyphs);
 
@@ -345,4 +348,5 @@ void ps5_import_game_data(const char *game_folder)
     SDL_DestroyTexture(title.texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    SDL_ShowCursor(SDL_ENABLE);
 }
