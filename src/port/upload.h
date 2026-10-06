@@ -1,7 +1,7 @@
 /* A small HTTP server for sending the RollerCoaster Tycoon 2 game folder from a browser on the same
  * network (adapted from the DOOM port's). It serves the page in upload.html, stores each file the
- * page sends below the game folder's own folders, and hands ZIP files of the folder to the caller.
- * It runs only between upload_start and upload_stop. */
+ * page sends below the game folder's own folders, and hands ZIP files of the folder and GOG
+ * installers to the caller. It runs only between upload_start and upload_stop. */
 #ifndef PS5_UPLOAD_H
 #define PS5_UPLOAD_H
 
@@ -21,6 +21,7 @@ typedef struct
     int files;                 /* files stored */
     long long bytes;           /* bytes stored */
     int batches;               /* times the page said it sent everything it was given */
+    int installer_files;       /* .exe and .bin files of a GOG installer stored */
 } upload_progress_t;
 
 /* Starts listening and storing below game_folder; 0 on success. The address is "" when the
@@ -33,6 +34,13 @@ void upload_progress(upload_progress_t *progress);
 
 /* Hands over the oldest ZIP file received: 1 when there was one, with its path. */
 int upload_take_zip(char *path, size_t size);
+
+/* Hands over the GOG installer's .exe (its .bin files are stored next to it) once the page has
+ * finished sending, and again after more of its files arrive: 1 when it is ready, with its path. */
+int upload_take_setup(char *path, size_t size);
+
+/* Deletes the installer's files. */
+void upload_remove_installer(void);
 
 /* Turns a path inside the game folder, as a browser or a ZIP file names it ("RCT2/Data/g1.dat"),
  * into the path to store it under ("Data/g1.dat"): only files below the game's own folders are

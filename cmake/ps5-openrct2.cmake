@@ -16,8 +16,9 @@ function(ps5_port)
     set_property(TARGET openrct2 APPEND PROPERTY LINK_DEPENDS
         "${PS5_PREFIX}/lib/libps5runtime.a" "${PS5_PREFIX}/lib/ps5-crt.o"
         "${PS5_PORT_ROOT}/src/runtime/ps5.ld" "${PS5_PORT_ROOT}/tools/ps5-link" ${stubs})
-    # Libraries that pkg-config and FindICU name only for static builds.
-    foreach(library icudata vorbis ogg)
+    # Libraries that pkg-config and FindICU name only for static builds, and liblzma for the import
+    # screen's installer reader.
+    foreach(library icudata vorbis ogg lzma)
         target_link_libraries(openrct2 "${PS5_PREFIX}/lib/lib${library}.a")
     endforeach()
 endfunction()

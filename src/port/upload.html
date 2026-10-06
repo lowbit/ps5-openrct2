@@ -63,20 +63,21 @@
 <body>
 <main>
   <h1>Send <span>RollerCoaster Tycoon 2</span> to OpenRCT2</h1>
-  <p>OpenRCT2 needs the game files of your copy of RollerCoaster Tycoon 2: the folder with
-    <code>Data</code>, <code>ObjData</code>, <code>Scenarios</code>, <code>Tracks</code> and
-    <code>Landscapes</code> in it. Choose or drop that folder, or a ZIP file of it. Other files in
-    it are left out.</p>
+  <p>OpenRCT2 needs the game files of your copy of RollerCoaster Tycoon 2. Send the installer
+    from GOG (the setup <code>.exe</code> and its <code>.bin</code> file, both at once), or the
+    game folder with <code>Data</code>, <code>ObjData</code>, <code>Scenarios</code>,
+    <code>Tracks</code> and <code>Landscapes</code> in it, or a ZIP file of that folder. Other
+    files are left out.</p>
   <div id="offline">The console is not listening. Start OpenRCT2 on the PS5; it waits for the game
     files on its first start.</div>
   <label class="drop" id="drop">
     <input id="folder" type="file" webkitdirectory multiple>
-    <strong>Drop the game folder here</strong>
-    <span>or click to choose it</span>
+    <strong>Drop the GOG installer or the game folder here</strong>
+    <span>or click to choose the game folder</span>
   </label>
   <label class="drop">
-    <input id="zip" type="file" accept=".zip">
-    <span>On a phone, or with the folder in a ZIP file: click to choose the ZIP</span>
+    <input id="files" type="file" accept=".exe,.bin,.zip" multiple>
+    <span>Click to choose files: the installer's .exe and .bin together, or a ZIP file (on a phone too)</span>
   </label>
   <div id="state"></div>
   <progress id="bar" max="1" value="0" hidden></progress>
@@ -121,13 +122,8 @@
     });
   }
 
-  async function send(list) {
+  async function send(files) {
     if (busy) return;
-    const files = list.filter((entry) => entry.path !== null);
-    if (!files.length) {
-      addLog("No Data, ObjData, Scenarios, Tracks or Landscapes folder in what was chosen", false);
-      return;
-    }
     busy = true;
     const total = files.reduce((sum, entry) => sum + entry.file.size, 0);
     const started = performance.now();
@@ -179,12 +175,22 @@
     return found;
   }
 
+  // A game folder is sent as it is; otherwise a GOG installer's .exe and .bin files (also from
+  // inside a dropped download folder), or ZIP files, each under its own name.
   function chosen(list) {
+    const name = (entry) => entry.name.split("/").pop();
+    const game = list.map((entry) => ({ file: entry.file, path: gamePath(entry.name) }))
+      .filter((entry) => entry.path !== null);
+    const installer = list.filter((entry) => /\.(exe|bin)$/i.test(name(entry)));
     const zips = list.filter((entry) => /\.zip$/i.test(entry.name) && !entry.name.includes("/"));
-    if (zips.length) {
+    if (game.length) {
+      send(game);
+    } else if (installer.length) {
+      send(installer.map((entry) => ({ file: entry.file, path: name(entry) })));
+    } else if (zips.length) {
       send(zips.map((entry) => ({ file: entry.file, path: entry.name })));
     } else {
-      send(list.map((entry) => ({ file: entry.file, path: gamePath(entry.name) })));
+      addLog("Nothing to send in what was chosen: the GOG installer, the game folder or a ZIP file of it", false);
     }
   }
 
@@ -220,7 +226,7 @@
       ? await dropped(items)
       : [...event.dataTransfer.files].map((file) => ({ file, name: file.name })));
   });
-  for (const id of ["folder", "zip"]) {
+  for (const id of ["folder", "files"]) {
     const picker = document.getElementById(id);
     picker.addEventListener("change", () => {
       chosen([...picker.files].map((file) => ({ file, name: file.webkitRelativePath || file.name })));

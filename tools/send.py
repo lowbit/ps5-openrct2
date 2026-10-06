@@ -1,13 +1,15 @@
-"""Sends the RollerCoaster Tycoon 2 game folder (or a ZIP file of it) to the import screen, the way
-its web page does, and prints what the console said.
+"""Sends the RollerCoaster Tycoon 2 game folder (or a ZIP file of it, or the GOG installer) to the
+import screen, the way its web page does, and prints what the console said.
 
-    uv run --no-project python tools/send.py http://192.168.0.90:9666/ E:/scratch/rct2
+    uv run --no-project python tools/send.py http://192.168.0.90:9666/ path/to/rct2
     uv run --no-project python tools/send.py ADDRESS FOLDER --only Data/g1.dat Data/css1.dat
     uv run --no-project python tools/send.py ADDRESS game.zip
+    uv run --no-project python tools/send.py ADDRESS setup_rollercoaster_tycoon_2_....exe
 
 The screen shows the address. Only files below Data, ObjData, Scenarios, Tracks and Landscapes
-are sent; --only limits that to the paths given (relative to the folder). Used with
-test/console-import.cfg for hands-free tests.
+are sent; --only limits that to the paths given (relative to the folder). An installer's .exe is
+sent with the .bin files next to it that share its name. Used with test/console-import.cfg for
+hands-free tests.
 """
 import argparse
 import http.client
@@ -55,7 +57,10 @@ def main():
                 raise SystemExit("the screen does not answer")
             time.sleep(2)
 
-    if args.source.is_file():
+    if args.source.suffix.lower() == ".exe":
+        parts = sorted(args.source.parent.glob(args.source.stem + "-*.bin"))
+        files = [(file.name, file) for file in [args.source, *parts]]
+    elif args.source.is_file():
         files = [(args.source.name, args.source)]
     else:
         files = []

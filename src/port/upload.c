@@ -1,6 +1,6 @@
 /* The upload server (see upload.h). Requests are handled one at a time on one thread: PUT
  * /upload/<path> stores a file (written as <path>.upload, renamed when complete), POST /done marks
- * the end of a folder, GET /status returns the console's notes for the page, GET / the page. */
+ * the end of a send, GET /status returns the console's notes for the page, GET / the page. */
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -56,6 +56,10 @@ static char address[64];
 static upload_progress_t progress;
 static char zips[MAX_ZIPS][UPLOAD_PATH];
 static int zip_count;
+/* The installer's .exe; whether installer files arrived since the last send, and since the .exe
+ * was last handed over. */
+static char setup[UPLOAD_PATH];
+static int installer_sent, setup_ready;
 static note_t notes[MAX_NOTES];
 static int note_count, next_note = 1;
 
@@ -93,18 +97,20 @@ static void respond_text(int fd, const char *status, const char *text)
     respond(fd, status, "text/plain; charset=utf-8", text, strlen(text));
 }
 
-/* recv that gives up when the server stops or the browser stays quiet for too long. */
+/* recv that gives up when the server stops or the browser stays quiet for too long. Stopping is
+ * checked before every recv: a fast sender never lets one time out, and Circle would otherwise
+ * wait for the whole file. */
 static ssize_t receive(int fd, void *buffer, size_t size)
 {
-    for (int idle = 0;;)
+    for (int idle = 0; !stopping;)
     {
         ssize_t got = recv(fd, buffer, size, 0);
         if (got >= 0)
             return got;
-        if ((errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) || stopping ||
-            ++idle >= IDLE_LIMIT_S / RECEIVE_TIMEOUT_S)
+        if ((errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) || ++idle >= IDLE_LIMIT_S / RECEIVE_TIMEOUT_S)
             return -1;
     }
+    return -1;
 }
 
 /* Reads the request head into head[]; returns its length including the blank line, with the
@@ -268,7 +274,7 @@ static void put_file(int fd, const char *target, int head_length, int used)
     char sent_path[UPLOAD_PATH], path[UPLOAD_PATH], part[UPLOAD_PATH * 2 + 16], final[UPLOAD_PATH * 2];
     const char *value = header_value("Content-Length");
     long long length = value != NULL ? strtoll(value, NULL, 10) : -1, done = 0;
-    int out, lost = 0, error = 0, zip = 0;
+    int out, lost = 0, error = 0, zip = 0, installer = 0;
 
     if (url_decode(sent_path, sizeof(sent_path), target) != 0)
     {
@@ -278,13 +284,23 @@ static void put_file(int fd, const char *target, int head_length, int used)
     const char *dot = strrchr(sent_path, '.');
     if (upload_game_path(path, sizeof(path), sent_path) != 0)
     {
-        if (dot == NULL || strcasecmp(dot, ".zip") != 0 || strchr(sent_path, '/') != NULL)
+        /* Single files: a ZIP file of the game folder, or a GOG installer's .exe and .bin files. */
+        const int single = dot != NULL && strchr(sent_path, '/') == NULL && plain_name(sent_path, strlen(sent_path));
+        if (single && strcasecmp(dot, ".zip") == 0)
+        {
+            zip = 1;
+            snprintf(path, sizeof(path), "import-%d.zip", progress.files + zip_count);
+        }
+        else if (single && (strcasecmp(dot, ".exe") == 0 || strcasecmp(dot, ".bin") == 0))
+        {
+            installer = 1;
+            snprintf(path, sizeof(path), "%s", sent_path);
+        }
+        else
         {
             respond_text(fd, "403 Forbidden", "Not part of the game folder: left out.");
             return;
         }
-        zip = 1;
-        snprintf(path, sizeof(path), "import-%d.zip", progress.files + zip_count);
     }
     if (length < 0)
     {
@@ -353,13 +369,20 @@ static void put_file(int fd, const char *target, int head_length, int used)
     pthread_mutex_lock(&lock);
     if (zip)
         snprintf(zips[zip_count++], UPLOAD_PATH, "%s", final);
+    else if (installer)
+    {
+        progress.installer_files++;
+        installer_sent = 1;
+        if (strcasecmp(dot, ".exe") == 0)
+            snprintf(setup, sizeof(setup), "%s", final);
+    }
     else
     {
         progress.files++;
         progress.bytes += length;
     }
     pthread_mutex_unlock(&lock);
-    respond_text(fd, "200 OK", zip ? "Received; the console unpacks it." : "Received.");
+    respond_text(fd, "200 OK", zip || installer ? "Received; the console unpacks it." : "Received.");
 }
 
 static void send_status(int fd, const char *query)
@@ -411,6 +434,8 @@ static void handle(int fd)
     {
         pthread_mutex_lock(&lock);
         progress.batches++;
+        setup_ready = setup_ready || (installer_sent && setup[0] != '\0');
+        installer_sent = 0;
         pthread_mutex_unlock(&lock);
         respond_text(fd, "200 OK", "Done.");
     }
@@ -513,6 +538,27 @@ static void find_address(void)
     close(fd);
 }
 
+/* Removes the files of a GOG installer, and with zips ZIP files too: they are only ever stored at
+ * the top of the game folder. */
+static void remove_single_files(int zips)
+{
+    DIR *dir = opendir(folder);
+    if (dir == NULL)
+        return;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        const char *dot = strrchr(entry->d_name, '.');
+        if (entry->d_type == DT_DIR || dot == NULL ||
+            (strcasecmp(dot, ".exe") != 0 && strcasecmp(dot, ".bin") != 0 && (!zips || strcasecmp(dot, ".zip") != 0)))
+            continue;
+        char path[UPLOAD_PATH * 2];
+        snprintf(path, sizeof(path), "%s/%s", folder, entry->d_name);
+        unlink(path);
+    }
+    closedir(dir);
+}
+
 /* Removes partial files a crash or a power loss left behind. */
 static void remove_leftovers(const char *path)
 {
@@ -565,8 +611,11 @@ int upload_start(const char *game_folder)
     snprintf(folder, sizeof(folder), "%s", game_folder);
     mkdir(folder, 0755);
     remove_leftovers(folder);
+    remove_single_files(1);
     memset(&progress, 0, sizeof(progress));
     zip_count = 0;
+    setup[0] = '\0';
+    installer_sent = setup_ready = 0;
     note_count = 0;
 
     for (port = UPLOAD_PORT; port < UPLOAD_PORT + UPLOAD_PORT_TRIES; port++)
@@ -625,6 +674,29 @@ int upload_take_zip(char *path, size_t size)
     }
     pthread_mutex_unlock(&lock);
     return taken;
+}
+
+int upload_take_setup(char *path, size_t size)
+{
+    int taken = 0;
+    pthread_mutex_lock(&lock);
+    if (setup_ready)
+    {
+        snprintf(path, size, "%s", setup);
+        setup_ready = 0;
+        taken = 1;
+    }
+    pthread_mutex_unlock(&lock);
+    return taken;
+}
+
+void upload_remove_installer(void)
+{
+    pthread_mutex_lock(&lock);
+    setup[0] = '\0';
+    setup_ready = 0;
+    pthread_mutex_unlock(&lock);
+    remove_single_files(0);
 }
 
 void upload_note(const char *text, int ok)

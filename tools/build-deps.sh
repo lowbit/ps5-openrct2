@@ -98,6 +98,20 @@ if ! built libzip; then
     done_with libzip
 fi
 
+# liblzma for the import screen's GOG installer reader (src/port/inno.c): raw LZMA1 and LZMA2
+# decoding only.
+if ! built xz; then
+    fetch xz-5.8.1.tar.gz 507825b599356c10dca1cd720c9d0d0c9d5400b9de300af00e4d1ea150795543 \
+        https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.gz
+    unpack xz-5.8.1.tar.gz xz-5.8.1
+    cmake_install xz "$sources/xz-5.8.1" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DXZ_NLS=OFF \
+        -DXZ_THREADS=no -DXZ_ENCODERS= -DXZ_DECODERS="lzma1;lzma2" -DXZ_TOOL_XZ=OFF \
+        -DXZ_TOOL_XZDEC=OFF -DXZ_TOOL_LZMADEC=OFF -DXZ_TOOL_LZMAINFO=OFF -DXZ_TOOL_SCRIPTS=OFF \
+        -DXZ_LZIP_DECODER=OFF -DXZ_MICROLZMA_DECODER=OFF -DXZ_MICROLZMA_ENCODER=OFF -DXZ_DOC=OFF \
+        -DXZ_SANDBOX=no
+    done_with xz
+fi
+
 if ! built ogg; then
     fetch libogg-1.3.6.tar.xz 5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061 \
         https://github.com/xiph/ogg/releases/download/v1.3.6/libogg-1.3.6.tar.xz \
