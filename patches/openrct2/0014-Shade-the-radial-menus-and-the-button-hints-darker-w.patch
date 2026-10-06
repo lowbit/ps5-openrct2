@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rijads <spaha92@gmail.com>
+Date: Tue, 6 Oct 2026 11:43:57 +0200
+Subject: [PATCH] Shade the radial menus and the button hints darker, with
+ outlined text
+
+The radial menus' disc and name band and the hints bar used the middle shade (paletteDarken2),
+which left white text hard to read over a busy park on a TV. They now take the darkest shade
+twice over, and their text has the font's outline.
+---
+ src/openrct2-ui/input/Gamepad.cpp      |  8 ++++++--
+ src/openrct2-ui/windows/RadialMenu.cpp | 17 +++++++++--------
+ 2 files changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/src/openrct2-ui/input/Gamepad.cpp b/src/openrct2-ui/input/Gamepad.cpp
+index 509ba01..231114f 100644
+--- a/src/openrct2-ui/input/Gamepad.cpp
++++ b/src/openrct2-ui/input/Gamepad.cpp
+@@ -1225,13 +1225,17 @@ namespace OpenRCT2::Ui
+         const ScreenRect area = { centre - ScreenCoordsXY{ width / 2 + 6, kHintHeight / 2 + 1 },
+                                   centre + ScreenCoordsXY{ width / 2 + 6, kHintHeight / 2 + 1 } };
+ 
+-        Rectangle::filter(rt, area, FilterPaletteID::paletteDarken2);
++        // The darkest shade twice over, as behind the radial menus.
++        Rectangle::filter(rt, area, FilterPaletteID::paletteDarken3);
++        Rectangle::filter(rt, area, FilterPaletteID::paletteDarken3);
+         ScreenCoordsXY at = { area.GetLeft() + 6, area.GetTop() + 3 };
+         for (const auto& hint : hints)
+         {
+             DrawGlyph(rt, hint, at);
+             at.x += GlyphWidth(hint) + 3;
+-            drawText(rt, at + ScreenCoordsXY{ 0, -1 }, hint.action, { Colour::white });
++            drawText(
++                rt, at + ScreenCoordsXY{ 0, -1 }, hint.action,
++                { ColourWithFlags{ Colour::white }.withFlag(ColourFlag::withOutline, true) });
+             at.x += getStringWidth(hint.action, FontStyle::medium) + kHintGap;
+         }
+ 
+diff --git a/src/openrct2-ui/windows/RadialMenu.cpp b/src/openrct2-ui/windows/RadialMenu.cpp
+index 2faad58..04f4a3b 100644
+--- a/src/openrct2-ui/windows/RadialMenu.cpp
++++ b/src/openrct2-ui/windows/RadialMenu.cpp
+@@ -152,15 +152,18 @@ namespace OpenRCT2::Ui::Windows
+ 
+         void onDraw(RenderTarget& rt) override
+         {
+-            // A dark disc behind the ring, and a band for the name under it.
++            // A dark disc behind the ring, and a band for the name under it: the game's darkest shade
++            // twice over, so the buttons and the name stand out from any part of the park.
++            const auto shade = [&rt](const ScreenRect& area) {
++                Rectangle::filter(rt, area, FilterPaletteID::paletteDarken3);
++                Rectangle::filter(rt, area, FilterPaletteID::paletteDarken3);
++            };
+             const int32_t radius = kRadius + kButtonSize.height / 2 + 6;
+             const auto centre = windowPos + kCentre;
+             for (int32_t dy = -radius; dy <= radius; dy++)
+             {
+                 const auto half = static_cast<int32_t>(std::sqrt(static_cast<double>(radius * radius - dy * dy)));
+-                Rectangle::filter(
+-                    rt, { centre + ScreenCoordsXY{ -half, dy }, centre + ScreenCoordsXY{ half, dy } },
+-                    FilterPaletteID::paletteDarken2);
++                shade({ centre + ScreenCoordsXY{ -half, dy }, centre + ScreenCoordsXY{ half, dy } });
+             }
+ 
+             drawWidgets(rt);
+@@ -182,12 +185,10 @@ namespace OpenRCT2::Ui::Windows
+             if (_highlighted >= 0)
+             {
+                 const ScreenCoordsXY labelTop = { windowPos.x + 2, centre.y + radius + 4 };
+-                Rectangle::filter(
+-                    rt, { labelTop, labelTop + ScreenCoordsXY{ kWindowSize.width - 5, 2 * kLabelHeight - 4 } },
+-                    FilterPaletteID::paletteDarken2);
++                shade({ labelTop, labelTop + ScreenCoordsXY{ kWindowSize.width - 5, 2 * kLabelHeight - 4 } });
+                 drawTextWrapped(
+                     rt, { centre.x, labelTop.y + 2 }, kWindowSize.width - 8, _entries[_highlighted].name,
+-                    { Colour::white, TextAlignment::centre });
++                    { ColourWithFlags{ Colour::white }.withFlag(ColourFlag::withOutline, true), TextAlignment::centre });
+             }
+         }
+     };
