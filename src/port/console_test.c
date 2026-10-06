@@ -173,6 +173,8 @@ static void drain(unsigned timeout_us)
 static void remove_tree(const char *path)
 {
     DIR *dir = opendir(path);
+    if (dir == NULL && unlink(path) == 0)
+        return;
     if (dir != NULL)
     {
         struct dirent *entry;

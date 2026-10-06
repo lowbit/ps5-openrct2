@@ -3,7 +3,8 @@
     uv run --no-project --with pillow python tools/console_test.py test/console-boot.cfg [--timeout S]
 
 Writes the plan to the title folder as test.cfg (plus a capture port), launches PPSA99728 with the
-rct2launch payload (tools/launcher, loaded through the Payload Manager), pulls the frames the plan
+rct2launch payload (tools/launcher, loaded through the Payload Manager; through the PS5Upload
+engine's launch route when the Payload Manager does not answer), pulls the frames the plan
 captures from the running title over TCP and saves them as PNG under build/test/run/, receives the
 title's log over the same connection when it exits (build/test/run/openrct2.log), prints it and
 removes test.cfg again. If the title dies before that, the log is still in the title folder:
@@ -112,7 +113,13 @@ def main():
     plan = Path(args.plan).read_text().rstrip("\n") + f"\nserve {CAPTURE_PORT}\n"
     write_remote(TEST_PLAN, plan.encode())
 
-    print("launch:", get(f"{PLDMGR}/loadpayload:{LAUNCHER.name}", timeout=30).strip()[:200], flush=True)
+    try:
+        print("launch:", get(f"{PLDMGR}/loadpayload:{LAUNCHER.name}", timeout=30).strip()[:200], flush=True)
+    except OSError as e:
+        # The Payload Manager's port can stay dead after rest mode; the engine launches the title
+        # too, but does not close a running one first.
+        print(f"payload manager unreachable ({e}); launching through the engine", flush=True)
+        print("launch:", push.http("POST", "/api/ps5/app/launch", {"addr": push.XFER, "title_id": TITLE}), flush=True)
     seen = set()
     deadline = time.time() + args.timeout
     try:
