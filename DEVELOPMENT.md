@@ -10,7 +10,7 @@ from a PC (2457 files, 671 MB, in about 2.5 minutes), after which the game start
 played with the DualSense alone (Controls, below); console tests drove the menus, lists, tabs,
 radial menus, track and path building and scenery placement with it. Not yet confirmed on
 hardware: how the controls feel in a person's hands, typing in the IME dialog (it opens), a ZIP
-import, and an import from a phone's browser. The sound works (Rijad heard it, 2026-10-05). The
+import, and an import from a phone's browser. The sound works (heard on a TV, 2026-10-05). The
 controller is the only input: mice, USB keyboards and the TV remote are not read, and text comes
 from the on-screen keyboard.
 
@@ -22,15 +22,16 @@ from the on-screen keyboard.
 | `patches/openrct2/` | The port's changes to OpenRCT2 (`tools/export-patches.sh` writes them from the `ps5` branch) |
 | `patches/sdl/` | Changes to ps5-payload-dev's SDL (made in `.deps/sdl-dev`, a git copy, with `git format-patch`) |
 | `src/runtime/` | What every PS5 link gets (`libps5runtime.a`), the linker script, and lists for module stubs the SDK lacks |
-| `src/port/` | PS5 code compiled into the game: `main`, the import screen and its upload server and page, the console test harness |
+| `src/port/` | PS5 code compiled into the game: `main`, the import screen with its upload server and page and the GOG installer reader, the console test harness |
 | `sce_sys/` | `param.json` and the icon (the OpenRCT2 logo on a dark background) |
 | `test/` | Console test plans |
-| `screenshots/` | For showing the port: the title, the import screen and its page, a park (Six Flags Magic Mountain) with the button hints, both radial menus, a list moved through with the d-pad. Console captures halved (the game draws at 960x540 and doubles each pixel); the import screen at full size |
+| `screenshots/` | For showing the port, taken on the console on 2026-10-06: a looping coaster, wooden track built with the button hints, the park radial menu, the title, and the import screen receiving the GOG installer next to its page in a browser. PS5 screenshots (3840x2160 JPEG XR, decoded with WPF's `WmpBitmapDecoder`) halved to the game's 1920x1080; the page cropped to 16:9 |
 | `cmake/ps5.cmake` | CMake toolchain for the console |
 | `cmake/ps5-openrct2.cmake` | Hooked into OpenRCT2's project: adds `src/port`, qrcodegen, the generated headers and the static-only libraries |
 | `tools/ps5-cc`, `tools/ps5-c++`, `tools/ps5-link` | Compiler drivers for the console; any link produces a PS5 module |
 | `tools/build-*.sh`, `tools/package.sh` | Native tools, runtime, dependencies, host build, PS5 build, title folder |
 | `tools/deploy.py`, `console_test.py`, `send.py`, `klog.py`, `symbolize.sh` | Console side: upload, tests, sending game files, kernel log, crash frames |
+| `tools/test-inno.sh`, `inno-unpack.c` | The GOG installer reader built for the PC and checked against innoextract |
 | `docker/` | The build image |
 
 ## Build
@@ -56,8 +57,8 @@ update and looks for it in the data folder when there is no system documentation
    and the clean-room `libc.prx`.
 2. `tools/build-runtime.sh`: the CRT (the boilerplate's `app_crt.cpp`), `libps5runtime.a` and the
    system module stubs into `.deps/ps5`. Outputs are replaced only when they change.
-3. `tools/build-deps.sh`: zlib, libpng, zstd, libzip, Ogg, Vorbis, FLAC, nlohmann/json, ICU, SDL2
-   and qrcodegen, pinned and checked by SHA-256, into `.deps/ps5`. Each has a stamp in
+3. `tools/build-deps.sh`: zlib, libpng, zstd, libzip, liblzma (xz), Ogg, Vorbis, FLAC,
+   nlohmann/json, ICU, SDL2 and qrcodegen, pinned and checked by SHA-256, into `.deps/ps5`. Each has a stamp in
    `build/deps`; delete it to rebuild one (SDL after changing `patches/sdl`).
 4. `tools/build-ps5.sh`: the import screen's headers (`build/gen`: the page from
    `tools/embed-file.py`, the fonts from `tools/make-font.py`), then OpenRCT2 with
@@ -177,6 +178,10 @@ offers, instead of guessing from compile-only checks.
     `UiContext::Draw`, marking their area dirty each frame as the FPS counter does), and
     `WindowSceneryRaise`/`WindowSceneryCanRaise`: the controller's stepped version of holding Shift
     while placing scenery.
+13. While a radial menu is up: no pointer, no tooltips on its buttons, no park label under the
+    pointer (each could cover the name under the ring).
+14. The radial menus' disc and name band and the hints bar in the darkest shade twice over
+    (`paletteDarken3`; `paletteDarken2` read poorly on a TV), their text outlined.
 
 ## The port (`src/port`)
 
@@ -186,7 +191,7 @@ offers, instead of guessing from compile-only checks.
   selects SDL's software renderer (OpenRCT2 asks for an accelerated one), runs the import screen
   when the game files are missing, and runs OpenRCT2 with `/app0/data`, `/app0/rct2` and
   `/download0/user` (config, saves, caches; `downloadDataSize` 1024 MB).
-- `import_screen.c`, `upload.c`, `upload.html`: importing the game files (below).
+- `import_screen.c`, `upload.c`, `upload.html`, `inno.c`: importing the game files (below).
 - `console_test.c`, `pad_script.c`: the test harness (below).
 
 ## Controls
@@ -221,34 +226,70 @@ thumps when a piece is built.
 Settings: the game's Controls options, *Gamepad deadzone* and *Gamepad sensitivity*, apply to the
 pointer too (the sensitivity scales its speed: 1.5 is the default).
 
+The interface stays at twice its size (Display options, *UI scale*); larger was tried on 2026-10-06
+and dropped. RCT2's windows are laid out for a screen at least 480 lines tall, and OpenRCT2's
+footpath window needs about 525: at 2.5 (768x432) the ride construction window's Entrance button
+sits under the money panel and the footpath window's bridge, tunnel and area buttons fall below the
+screen; at 2.25 (853x480) the area button is still under the money panel. Any fractional scale also
+halves the frame rate (30 instead of 60): OpenRCT2 draws the screen at the next whole multiple and
+SDL's software renderer shrinks it with its linear filter. Scaling by area on the CPU in one pass
+(a window pixel across two screen pixels mixes them) brought it back to 60 at about 2 ms a frame,
+if a larger interface is ever wanted.
+
 ## Importing the game files
 
 When `/app0/rct2/Data/g1.dat` is missing, the title shows a screen with an address
-(`http://<console>:9666/`, or the next free port) and its QR code. The page there takes the
-RollerCoaster Tycoon 2 folder (chosen or dropped; only files below Data, ObjData, Scenarios,
-Tracks and Landscapes are sent) or a ZIP file of it (for phones, which cannot send folders), and
+(`http://<console>:9666/`, or the next free port) and its QR code. The page there takes the GOG
+installer (its setup `.exe` and `.bin` file, chosen or dropped together, or the download folder
+dropped), the RollerCoaster Tycoon 2 folder (chosen or dropped; only files below Data, ObjData,
+Scenarios, Tracks and Landscapes are sent) or a ZIP file of it (phones cannot send folders), and
 ends with `POST /done`. The server stores files below those folders only, each path part a plain
-name, as `<path>.upload` renamed when complete; the screen unpacks ZIP files with libzip under the
-same rules. The server handles one request at a time but keeps up to eight connections waiting
+name, as `<path>.upload` renamed when complete; ZIP files and the installer's `.exe` and `.bin`
+files go at the top of the game folder, under their own names. The screen unpacks ZIP files with
+libzip under the same rules, and the installer, once the page has finished, on a thread with
+`inno.c`, then deletes it (unless a `.bin` file is missing: sending it tries again).
+
+`inno.c` reads Inno Setup installers (Unicode, data versions 5.5.0 to 6.4), after innoextract's
+reading of the format: the offset table among the `.exe`'s resources, the CRC-checked,
+LZMA-compressed headers, the entries up to the file list, the data entries, then each chunk of
+the `.bin` slices (zlib, LZMA1 or LZMA2 with liblzma) read once, front to back, every file checked
+against its SHA-1. GOG's installer for the Triple Thrill Pack (Inno Setup 5.6.2, GOG Galaxy style)
+keeps every game file under `{tmp}`, named after its MD5, in one or more parts, each deflated
+again; the real name and the parts are in calls to its install script, `before_install('<MD5>',
+'<path>', <parts>)` and `after_install('<MD5>', <size>, <inflated size>)`, as innoextract's
+`cli/goggalaxy.cpp` reads them. Password-protected (encrypted) and bzip2 installers are refused
+with a message. `tools/test-inno.sh` builds the reader for Linux and compares what it unpacks with
+innoextract (all 2457 game files of that installer match, 515 MB). On the console the 554 MB
+installer arrives in about 50 s and unpacks in about 85 s, against 2.5 to 7 minutes for sending the
+2457 files of the folder. Reading and inflating are nothing next to creating files in the title's
+folder: in one 174 s unpack, creating them took 85 s (about 35 ms each), writing 65 s (mostly
+the first write of each small file) and renaming `.upload` files 19 s. So the reader writes in
+place, and `unfinished-import` in the game folder, there from the start of an unpack until it
+succeeds, keeps the game from counting a half-unpacked folder (`Data/g1.dat` comes early) as
+complete; game files sent as a folder or ZIP file remove it. The screen clears its notes when a
+new send starts. The server handles one request at a time but keeps up to eight connections waiting
 and serves whichever sends a request first: browsers open connections before they need them and
 may leave them quiet, and waiting on one of those (up to 30 s) used to stall the page and every
 upload. The game starts once `Data/g1.dat` is there and the sender has finished. Circle closes
 the title; the screen has no pointer. The screen draws with SDL and fonts rendered from DejaVu Sans at build time
 (`tools/make-font.py`), since OpenRCT2 cannot draw before the game's own files exist.
 
-`uv run --no-project python tools/send.py http://192.168.0.90:9666/ E:/scratch/rct2` sends a folder
-the way the page does (`--only` sends some files, a `.zip` path sends that file).
+`uv run --no-project python tools/send.py http://192.168.0.90:9666/ path/to/rct2` sends a folder
+the way the page does (`--only` sends some files, a `.zip` path sends that file, an `.exe` path sends
+the installer with its `.bin` files).
 
 ## On the console
 
 `uv run --no-project python tools/deploy.py` uploads `dist/PPSA99728` to `/data/homebrew/PPSA99728`,
 where ShadowMountPlus registers it; `--eboot` uploads only the executable (what most iterations
-need), `--rct2 E:/scratch/rct2` also uploads the game folders as `rct2/`. `tools/deploy.py cat
+need), `--rct2 path/to/rct2` also uploads the game folders as `rct2/`. `tools/deploy.py cat
 PATH` prints a console file, e.g. `/data/homebrew/PPSA99728/openrct2.log`.
 
 `uv run --no-project --with pillow python tools/console_test.py test/console-boot.cfg` writes the
 plan as `test.cfg` into the title folder, launches the title with the `rct2launch` payload
-(`tools/launcher`, installed into `/data/pldmgr/payloads/rct2launch/`), pulls captured frames over
+(`tools/launcher`, installed into `/data/pldmgr/payloads/rct2launch/`; through the PS5Upload
+engine's launch route when the Payload Manager's port is dead after rest mode, which does not close
+a running title first), pulls captured frames over
 TCP port 9119 into `build/test/run/` as PNG, then the log when the plan's frame limit ends the
 game, and deletes `test.cfg`. Frames come from SDL's window surface before it is tiled for scanout,
 so they need no de-tiling. Plan lines:
@@ -260,7 +301,7 @@ so they need no de-tiling. Plan lines:
 | `frames N` | exit after N frames |
 | `input SCRIPT` | controller input: `START:INPUTS:COUNT` steps separated by `;`, inputs joined by `+` (button names, `LX=`/`LY=`/`RX=`/`RY=` tilts from -127 to 127, `TX=`/`TY=` a touchpad finger) |
 | `point N X Y` | put the pointer at window pixel X, Y at frame N |
-| `game PATH`, `remove PATH` | use another game folder (an empty one shows the import screen); delete a test folder |
+| `game PATH`, `remove PATH` | use another game folder (an empty one shows the import screen); delete a test folder or a file (under `/app0` or `/download0`), before the game starts |
 | `list PATH`, `stat PATH`, `realpath PATH` | log what the sandbox says |
 | `arg ARGUMENT` | add to OpenRCT2's command line, e.g. `--verbose` |
 
@@ -271,9 +312,12 @@ scrolling), `console-save`, `console-filemenu`, `console-perf`, `console-import`
 `console-dpad-game` (toolbar, tabs, closing), `console-radial`, `console-ime` (a text box asks for
 the on-screen keyboard), `console-track` (a miniature railway from the radial menu to built
 pieces), `console-path` (a bridge path) and `console-scenery`. Most
-start the first scenario by pointing at its button (`point`), and assume the title screen is up by
-frame 700, which holds when the object index exists (the first start after `reset` takes longer).
-`reset` deletes the player's own saves and settings on the console: use it only for first-run tests.
+start the first scenario by pointing at its button (`point`, Electric Fields while the scenario
+list remembers the RollerCoaster Tycoon 2 tab, `scenarioselect_last_tab = 3`), and assume the title screen is up by frame 700, which holds
+when the object index exists (the first start after `reset` takes longer). `reset` deletes the
+player's own saves and settings on the console: use it only for first-run tests. To change only the
+settings, `remove /download0/user/config.ini` starts over with the first-run config (the changelog
+opens once, and the scenario list forgets its tab).
 
 Crashes: start klogsrv (`GET :8084/repository_install?filename=klogsrv_v0.9.elf`, then
 `GET :8084/loadpayload:klogsrv_v0.9.elf`; not autoloaded, gone after a reboot) and record it with
@@ -299,14 +343,14 @@ report's list of loaded modules shows which imports can be null.
   took about 7 minutes again (1.6 MB/s). A probe (100 to 150 requests on fresh connections) put a
   4 KB upload at 31 ms but a 120 KB one at 62 ms median, 126 to 146 ms mean, up to 377 ms, with
   the old server and the new one alike, so the console's writes stalled, not the server. Reading
-  the 2457 files from `E:` (a 5400 rpm disk) also takes about 5 minutes when they are not cached.
+  the 2457 files from a 5400 rpm disk also takes about 5 minutes when they are not cached.
 - Rest mode (the TV turned off) stops a running test; the payloads' listening sockets die with it.
 
 ## Game data
 
-RCT2 from the GOG Triple Thrill Pack installer, extracted with `innoextract --gog` (in the build
-image) to `E:\scratch\rct2`: `Data` (with `g1.dat`), `ObjData` (2122 objects), `Scenarios` (57),
-`Tracks`, `Landscapes`, about 680 MB. Never commit or publish any of it.
+Tested with RCT2 from the GOG Triple Thrill Pack installer (2.01.043), extracted with `innoextract
+--gog` (in the build image) for the folder tests: `Data` (with `g1.dat`), `ObjData` (2122
+objects), `Scenarios` (57), `Tracks`, `Landscapes`, about 680 MB. Never commit or publish any of it.
 
 ## External code (pinned)
 
@@ -315,7 +359,9 @@ image) to `E:\scratch\rct2`: `Data` (with `g1.dat`), `ObjData` (2122 objects), `
 - [ps5-native-app-boilerplate](https://github.com/blackbearreloaded/ps5-native-app-boilerplate)
   `b1315a9` (GPL-3.0-or-later): `ps5-native-tool`, `libc.prx`, `app_crt.cpp`, the PIE linker
   script, and the PS5 payload SDK v0.42 it fetches (libc++, libc++abi, libunwind)
-- zlib 1.3.2, libpng 1.6.59, zstd 1.5.7, libzip 1.11.4, libogg 1.3.6, libvorbis 1.3.7, FLAC 1.5.0,
-  nlohmann/json 3.11.3, ICU 78.3, qrcodegen 1.8.0, DejaVu Sans (rendered into the import screen's
-  fonts)
+- zlib 1.3.2, libpng 1.6.59, zstd 1.5.7, libzip 1.11.4, xz 5.8.1 (liblzma, 0BSD), libogg 1.3.6,
+  libvorbis 1.3.7, FLAC 1.5.0, nlohmann/json 3.11.3, ICU 78.3, qrcodegen 1.8.0, DejaVu Sans
+  (rendered into the import screen's fonts)
+- The installer reader follows [innoextract](https://github.com/dscharrer/innoextract)'s reading of
+  the Inno Setup format (zlib licence); no code of it is used
 - The upload server and page are the DOOM port's, reworked
